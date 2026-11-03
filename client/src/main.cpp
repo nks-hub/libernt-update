@@ -60,6 +60,7 @@ std::wstring Usage() {
            L"LiberNTUpdate.exe /check          compare the newest release with this system\r\n"
            L"LiberNTUpdate.exe /install        install it (restart may be required)\r\n"
            L"LiberNTUpdate.exe /rollback       undo the most recent update\r\n"
+           L"LiberNTUpdate.exe /cancel         withdraw an update that waits for a restart\r\n"
            L"LiberNTUpdate.exe /finalize       finish a pending update (the service does this at boot)\r\n"
            L"LiberNTUpdate.exe /history        list past updates\r\n"
            L"LiberNTUpdate.exe /restart        restart the computer\r\n"
@@ -93,11 +94,9 @@ int Cli(const std::wstring& cmd) {
         Out(L"latest:    " + Widen(c.latest.id) + L" commit " + Widen(c.latest.commit));
         if (!c.pendingTx.empty()) Out(L"pending:   " + Widen(c.pendingTx) + L" (restart needed)");
         Out(L"changed:   " + std::to_wstring(c.changes.size()) + L" files");
-        size_t shown = 0;
-        for (auto& ch : c.changes) {
-            if (++shown > 60) { Out(L"  ..."); break; }
-            Out((ch.oldSha.empty() ? L"  new     " : L"  changed ") + Widen(ch.path));
-        }
+        for (auto& ch : c.changes)
+            Out((ch.oldSha.empty() ? L"  new     " : L"  changed ") + Widen(ch.path) + L"  " + Widen(ch.oldSha.substr(0, 12)) + L" -> " +
+                Widen(ch.newSha.substr(0, 12)));
         if (cmd == L"/check") return 0;
         std::wstring msg, svcErr;
         if (!EnsureFinalizeService(svcErr)) Out(L"warning: " + svcErr);
@@ -110,6 +109,12 @@ int Cli(const std::wstring& cmd) {
         InstallOutcome r = RollbackLast(cfg, msg, quiet);
         Out(std::wstring(OutcomeName(r)) + L": " + msg);
         return r == InstallOutcome::Failed ? 3 : 0;
+    }
+    if (cmd == L"/cancel") {
+        std::wstring msg;
+        bool ok = CancelPending(msg);
+        Out(msg);
+        return ok ? 0 : 1;
     }
     if (cmd == L"/finalize") {
         std::wstring msg;

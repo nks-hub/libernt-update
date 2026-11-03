@@ -35,7 +35,7 @@ python3 server/luup.py verify  --feed /srv/luup --pub "$(cat /opt/luup/signing.p
 Serve `/srv/luup` over HTTP. The client reads the feed URL and the system drive from
 `%ProgramData%\LiberNTUpdate\config.json` (`{"feedUrl": "http://host:8080/", "root": "C:\\"}`).
 
-Inside LiberNT, `LiberNTUpdate.exe` opens the window; `/check`, `/install`, `/rollback`, `/finalize`, `/history`,
+Inside LiberNT, `LiberNTUpdate.exe` opens the window; `/check`, `/install`, `/rollback`, `/cancel`, `/finalize`, `/history`,
 `/restart` and `/selftest` do the same from the command line and write their output to
 `%ProgramData%\LiberNTUpdate\cli-output.txt`.
 

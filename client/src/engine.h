@@ -52,6 +52,9 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
 /// Returns false when there was nothing to finalize.
 bool FinalizePending(const Config& cfg, std::wstring& message);
 
+/// Withdraws an update that waits for a restart: removes its scheduled renames, keeps the system as it is.
+bool CancelPending(std::wstring& message);
+
 /// Restores the files of the most recent installed transaction (directly or at the next restart).
 InstallOutcome RollbackLast(const Config& cfg, std::wstring& message, const Progress& progress);
 

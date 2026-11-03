@@ -604,6 +604,26 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
     return true;
 }
 
+bool CancelPending(std::wstring& message) {
+    std::string tx = PendingTransaction();
+    if (tx.empty()) { message = L"Žádná aktualizace nečeká na restart."; return false; }
+    json txj = LoadJson(JoinPath(TxDir(tx), L"tx.json"), json::object());
+    std::vector<std::wstring> deletes;
+    Config cfg = LoadConfig();
+    for (auto& o : OpsFromJson(txj.value("ops", json::array())))
+        if (o.staged.empty()) deletes.push_back(TargetPath(cfg, o.path));
+    UnscheduleRenames(tx, deletes);
+    json state = LoadState();
+    state["pending"] = "";
+    SaveState(state);
+    txj["state"] = "cancelled";
+    SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
+    json hist = HistoryFor(tx);
+    message = L"Čekající aktualizace " + Widen(tx) + L" je zrušená; systém zůstává beze změny.";
+    if (!hist.empty()) FinishHistory(hist, "cancelled", message);
+    return true;
+}
+
 InstallOutcome RollbackLast(const Config& cfg, std::wstring& message, const Progress& progress) {
     if (!PendingTransaction().empty()) { message = L"Nejdřív je potřeba restartovat kvůli čekající aktualizaci."; return InstallOutcome::Failed; }
     auto history = LoadJson(JoinPath(DataDir(), L"history.json"), json::array());
