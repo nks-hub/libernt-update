@@ -22,7 +22,9 @@ import datetime as dt
 import hashlib
 import json
 import os
+import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -76,6 +78,56 @@ def serviced(rel: str) -> bool:
     if low.endswith(EXCLUDE_SUFFIXES):
         return False
     return not any(part.startswith("$") for part in rel.split("/"))
+
+
+# Strings every build writes into its files: the build tag (20261103-nt10.0-044-1374-g320a592) and commit hashes.
+BUILD_TAG = re.compile(rb"20\d{6}-nt10\.0-\d{3}-\d{4}-g[0-9a-f]{7,12}")
+BUILD_TAG_UTF16 = re.compile(rb"2\x000\x00(?:\d\x00){6}-\x00n\x00t\x001\x000\x00\.\x000\x00-\x00(?:\d\x00){3}-\x00(?:\d\x00){4}-\x00g\x00(?:[0-9a-f]\x00){7,12}")
+COMMIT_HASH = re.compile(rb"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+
+
+def _pe_offset(b: bytes) -> int | None:
+    """Offset of the MZ header of a PE image: 0, or a sector boundary when a loader stub comes first (freeldr.sys)."""
+    for base in range(0, min(len(b), 0x10000), 0x200):
+        if b[base:base + 2] == b"MZ" and base + 0x40 <= len(b):
+            pe = base + struct.unpack_from("<I", b, base + 0x3C)[0]
+            if pe + 24 <= len(b) and b[pe:pe + 4] == b"PE\0\0":
+                return base
+    return None
+
+
+def build_neutral(b: bytes) -> bytes:
+    """The bytes with what changes on every build blanked out: PE time stamps, checksum, debug directory contents
+    (CodeView GUID, PDB path), build tags and, in PE images, commit hashes. Two files with equal results run the same."""
+    base = _pe_offset(b)
+    d = bytearray(b)
+    if base is not None:
+        pe = base + struct.unpack_from("<I", d, base + 0x3C)[0]
+        opt = pe + 24
+        d[pe + 8:pe + 12] = bytes(4)
+        d[opt + 64:opt + 68] = bytes(4)
+        ddir = opt + (96 if struct.unpack_from("<H", d, opt)[0] == 0x10B else 112)
+        nsec = struct.unpack_from("<H", d, pe + 6)[0]
+        secs = opt + struct.unpack_from("<H", d, pe + 20)[0]
+        dbg_rva, dbg_size = struct.unpack_from("<II", d, ddir + 6 * 8) if ddir + 56 <= len(d) else (0, 0)
+        for i in range(nsec if dbg_rva else 0):
+            vsize, va, rsize, raw = struct.unpack_from("<IIII", d, secs + 40 * i + 8)
+            if va <= dbg_rva < va + max(vsize, rsize):
+                off = base + raw + dbg_rva - va
+                for e in range(dbg_size // 28):
+                    ent = off + 28 * e
+                    if ent + 28 > len(d):
+                        break
+                    d[ent + 4:ent + 8] = bytes(4)
+                    size, ptr = struct.unpack_from("<I", d, ent + 16)[0], struct.unpack_from("<I", d, ent + 24)[0]
+                    if ptr and base + ptr + size <= len(d):
+                        d[base + ptr:base + ptr + size] = bytes(size)
+                break
+    out = bytes(d)
+    patterns = (BUILD_TAG, BUILD_TAG_UTF16, COMMIT_HASH) if base is not None else (BUILD_TAG, BUILD_TAG_UTF16)
+    for rx in patterns:
+        out = rx.sub(lambda m: b"#" * len(m.group(0)), out)
+    return out
 
 
 def sha256_file(path: Path) -> str:
@@ -184,6 +236,23 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
     feed_path = feed_dir / "feed.json"
     feed = json.loads(feed_path.read_text("utf-8")) if feed_path.exists() else {"product": "LiberNT", "format": 1, "releases": []}
     previous = feed["releases"][-1] if feed["releases"] else None
+
+    # A file rebuilt from unchanged sources differs only in build metadata; it keeps the previous release's
+    # contents, so clients neither download nor replace it.
+    kept = 0
+    if previous:
+        prev_files = {e["path"]: e for e in json.loads((feed_dir / previous["manifest"]).read_text("utf-8"))["files"]}
+        for f in files:
+            old = prev_files.get(f["path"])
+            if not old or old["sha256"] == f["sha256"] or old["size"] != f["size"]:
+                continue
+            old_obj = feed_dir / "objects" / old["sha256"][:2] / old["sha256"]
+            if old_obj.exists() and build_neutral(old_obj.read_bytes()) == build_neutral(f["_src"].read_bytes()):
+                f["sha256"] = old["sha256"]
+                f["_src"] = old_obj
+                kept += 1
+    if kept:
+        print(f"{kept} files differ from {previous['id']} only in build metadata and keep its contents")
 
     stored = 0
     for f in files:
@@ -299,6 +368,28 @@ def self_test() -> int:
         assert any(f["path"] == "Program Files/LiberNT Update/LiberNTUpdate.exe" for f in m4["files"])
         # 5 contents from the first two releases plus the two client files
         assert len(list((feed / "objects").rglob("*"))) - len(list((feed / "objects").iterdir())) == 7
+        assert verify_feed(feed, pub) == 0
+
+        def fake_pe(stamp: int, checksum: int, tag: bytes, code: bytes) -> bytes:
+            mz = b"MZ" + bytes(0x3A) + struct.pack("<I", 0x40)
+            coff = struct.pack("<HHIIIHH", 0x8664, 0, stamp, 0, 0, 0xF0, 0x22)
+            opt = bytearray(0xF0)
+            struct.pack_into("<H", opt, 0, 0x20B)
+            struct.pack_into("<I", opt, 64, checksum)
+            return mz + b"PE\0\0" + coff + bytes(opt) + code + b"LiberNT (Build " + tag + b")"
+
+        pe_path = tree / "Windows/system32/tool.exe"
+        pe_path.write_bytes(fake_pe(1, 0x1111, b"20261103-nt10.0-044-1374-g320a592", b"\x90" * 64))
+        e5 = publish_tree(tree, feed, key, "d" * 40, now=t0 + dt.timedelta(hours=4), client="v9.9.9")
+        sha5 = {f["path"]: f["sha256"] for f in json.loads((feed / e5["manifest"]).read_text("utf-8"))["files"]}
+        pe_path.write_bytes(fake_pe(2, 0x2222, b"20261104-nt10.0-044-1380-gcd66369", b"\x90" * 64))
+        e6 = publish_tree(tree, feed, key, "e" * 40, now=t0 + dt.timedelta(hours=5), client="v9.9.9")
+        assert e6 is e5 or e6["id"] == e5["id"], "a rebuild that changes only build metadata must not become a release"
+        pe_path.write_bytes(fake_pe(3, 0x3333, b"20261105-nt10.0-044-1390-g0a41bd8", b"\x90" * 63 + b"\xc3"))
+        e7 = publish_tree(tree, feed, key, "f" * 40, now=t0 + dt.timedelta(hours=6), client="v9.9.9")
+        sha7 = {f["path"]: f["sha256"] for f in json.loads((feed / e7["manifest"]).read_text("utf-8"))["files"]}
+        assert e7["changedFromPrevious"] == 1 and sha7["Windows/system32/tool.exe"] != sha5["Windows/system32/tool.exe"], e7
+        assert build_neutral(b"caroots: " + b"a" * 40) != build_neutral(b"caroots: " + b"b" * 40), "hashes in text files count"
         assert verify_feed(feed, pub) == 0
         (feed / "feed.json").write_bytes((feed / "feed.json").read_bytes().replace(b"LiberNT", b"Evil"))
         try:
