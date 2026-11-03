@@ -12,6 +12,7 @@
 #include "sha256.h"
 #include "util.h"
 
+#include "../boot/bootplan.h"
 extern "C" {
 #include "../third_party/monocypher/monocypher-ed25519.h"
 }
@@ -124,47 +125,99 @@ bool InUse(const std::wstring& path) {
     return e != ERROR_FILE_NOT_FOUND && e != ERROR_PATH_NOT_FOUND;
 }
 
-/// Removes the restart-time renames this transaction registered (used when it fails before the restart).
-void UnscheduleRenames(const std::string& tx, const std::vector<std::wstring>& deletedTargets) {
+std::wstring BootDir() { return JoinPath(DataDir(), L"boot"); }
+std::wstring BootFile(const wchar_t* name) { return JoinPath(BootDir(), name); }
+std::wstring NtPath(const std::wstring& win) { return L"\\??\\" + win; }
+
+bool WriteUtf16(const std::wstring& path, const std::wstring& text) {
+    std::string bytes("\xFF\xFE", 2);
+    bytes.append(reinterpret_cast<const char*>(text.data()), text.size() * sizeof(wchar_t));
+    return WriteTextAtomic(path, bytes);
+}
+
+/// Boot entry in freeldr.ini that starts the kernel and HAL from before the update with LNTUROLLBACK, which tells
+/// luupboot.exe to undo the update. Only BIOS installs boot through freeldr.ini; elsewhere this does nothing.
+const wchar_t kRecoverySection[] = L"LiberNTUpdateRecovery";
+
+std::wstring FreeldrIni(const Config& cfg) { return JoinPath(cfg.root, L"freeldr.ini"); }
+
+void RemoveRecoveryEntry(const Config& cfg) {
+    std::wstring ini = FreeldrIni(cfg);
+    if (!FileExists(ini)) return;
+    DWORD attrs = GetFileAttributesW(ini.c_str());
+    SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_NORMAL);
+    WritePrivateProfileStringW(L"Operating Systems", kRecoverySection, nullptr, ini.c_str());
+    WritePrivateProfileStringW(kRecoverySection, nullptr, nullptr, ini.c_str());
+    SetFileAttributesW(ini.c_str(), attrs);
+    wchar_t sys[MAX_PATH];
+    GetSystemDirectoryW(sys, MAX_PATH);
+    DeleteFileW(JoinPath(sys, L"lntuprev.exe").c_str());
+    DeleteFileW(JoinPath(sys, L"lntuphal.dll").c_str());
+}
+
+void AddRecoveryEntry(const Config& cfg) {
+    std::wstring ini = FreeldrIni(cfg);
+    if (!FileExists(ini)) return;
+    wchar_t sys[MAX_PATH], def[128], type[64], path[260], opts[512];
+    GetSystemDirectoryW(sys, MAX_PATH);
+    if (!CopyFileW(JoinPath(sys, L"ntoskrnl.exe").c_str(), JoinPath(sys, L"lntuprev.exe").c_str(), FALSE) ||
+        !CopyFileW(JoinPath(sys, L"hal.dll").c_str(), JoinPath(sys, L"lntuphal.dll").c_str(), FALSE)) {
+        LogLine("recovery entry skipped: cannot copy the current kernel and HAL: " + Narrow(LastErrorText(GetLastError())));
+        return;
+    }
+    GetPrivateProfileStringW(L"FREELOADER", L"DefaultOS", L"", def, 128, ini.c_str());
+    GetPrivateProfileStringW(def, L"BootType", L"Windows2003", type, 64, ini.c_str());
+    GetPrivateProfileStringW(def, L"SystemPath", L"", path, 260, ini.c_str());
+    GetPrivateProfileStringW(def, L"Options", L"", opts, 512, ini.c_str());
+    if (!*path) return;
+    DWORD attrs = GetFileAttributesW(ini.c_str());
+    SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_NORMAL);
+    WritePrivateProfileStringW(L"Operating Systems", kRecoverySection, L"\"LiberNT (undo the last update)\"", ini.c_str());
+    WritePrivateProfileStringW(kRecoverySection, L"BootType", type, ini.c_str());
+    WritePrivateProfileStringW(kRecoverySection, L"SystemPath", path, ini.c_str());
+    std::wstring o = std::wstring(opts) + L" /KERNEL=lntuprev.exe /HAL=lntuphal.dll /LNTUROLLBACK";
+    WritePrivateProfileStringW(kRecoverySection, L"Options", o.c_str(), ini.c_str());
+    SetFileAttributesW(ini.c_str(), attrs);
+}
+
+/// Installs luupboot.exe into system32 and registers it in BootExecute after autochk.
+bool EnsureBootApplier(std::wstring& error) {
+    wchar_t exe[MAX_PATH], sys[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    GetSystemDirectoryW(sys, MAX_PATH);
+    std::wstring src = JoinPath(std::wstring(exe).substr(0, std::wstring(exe).find_last_of(L'\\')), L"luupboot.exe");
+    std::wstring dst = JoinPath(sys, L"luupboot.exe");
+    if (!FileExists(src)) { error = src + L" chybí."; return false; }
+    if (Sha256File(src) != Sha256File(dst) && !CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
+        error = L"Nelze nainstalovat " + dst + L": " + LastErrorText(GetLastError());
+        return false;
+    }
     HKEY key;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kSessionManager, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &key) != ERROR_SUCCESS) return;
-    DWORD type = 0, size = 0;
-    if (RegQueryValueExW(key, L"PendingFileRenameOperations", nullptr, &type, nullptr, &size) == ERROR_SUCCESS && type == REG_MULTI_SZ && size) {
-        std::vector<wchar_t> buf(size / sizeof(wchar_t) + 2, 0);
-        RegQueryValueExW(key, L"PendingFileRenameOperations", nullptr, &type, (BYTE*)buf.data(), &size);
-        // Entries are (source, target) pairs; an empty target means "delete", so the list holds empty strings and
-        // has to be read pair by pair instead of stopping at the first empty one.
-        std::vector<std::wstring> items;
-        const wchar_t* p = buf.data();
-        const wchar_t* end = buf.data() + size / sizeof(wchar_t);
-        while (p < end) {
-            size_t n = wcslen(p);
-            items.emplace_back(p, n);
-            p += n + 1;
-            if (p < end && *p == 0 && items.size() % 2 == 0) break;  // double NUL ends the list
-        }
-        std::wstring marker = L"\\tx\\" + Widen(tx) + L"\\";
-        auto lower = [](std::wstring s) { std::transform(s.begin(), s.end(), s.begin(), ::towlower); return s; };
-        std::wstring lmarker = lower(marker);
-        std::vector<std::wstring> kept;
-        for (size_t i = 0; i + 1 < items.size(); i += 2) {
-            std::wstring src = lower(items[i]);
-            bool ours = src.find(lmarker) != std::wstring::npos;
-            if (!ours && items[i + 1].empty())
-                for (auto& t : deletedTargets)
-                    if (src == lower(L"\\??\\" + t)) ours = true;
-            if (!ours) { kept.push_back(items[i]); kept.push_back(items[i + 1]); }
-        }
-        if (kept.empty()) {
-            RegDeleteValueW(key, L"PendingFileRenameOperations");
-        } else {
-            std::wstring blob;
-            for (auto& s : kept) { blob += s; blob.push_back(L'\0'); }
-            blob.push_back(L'\0');
-            RegSetValueExW(key, L"PendingFileRenameOperations", 0, REG_MULTI_SZ, (const BYTE*)blob.data(), (DWORD)(blob.size() * sizeof(wchar_t)));
-        }
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kSessionManager, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
+        error = L"Nelze otevřít Session Manager v registru.";
+        return false;
+    }
+    std::vector<wchar_t> buf(4096, 0);
+    DWORD size = (DWORD)((buf.size() - 2) * sizeof(wchar_t)), type = 0;
+    std::vector<std::wstring> items;
+    if (RegQueryValueExW(key, L"BootExecute", nullptr, &type, (BYTE*)buf.data(), &size) == ERROR_SUCCESS && type == REG_MULTI_SZ)
+        for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) items.emplace_back(p);
+    std::wstring entry = L"luupboot " + NtPath(DataDir());
+    std::vector<std::wstring> next;
+    for (auto& s : items)
+        if (_wcsnicmp(s.c_str(), L"luupboot", 8) != 0) next.push_back(s);
+    next.push_back(entry);
+    bool ok = true;
+    if (next != items) {
+        std::wstring blob;
+        for (auto& s : next) { blob += s; blob.push_back(L'\0'); }
+        blob.push_back(L'\0');
+        ok = RegSetValueExW(key, L"BootExecute", 0, REG_MULTI_SZ, (const BYTE*)blob.data(), (DWORD)(blob.size() * sizeof(wchar_t))) == ERROR_SUCCESS;
+        if (ok) RegFlushKey(key);
+        else error = L"Nelze zapsat BootExecute.";
     }
     RegCloseKey(key);
+    return ok;
 }
 
 struct Op {
@@ -205,8 +258,34 @@ bool VerifyTargets(const Config& cfg, const std::vector<Op>& ops, std::wstring& 
     return true;
 }
 
-/// Applies a prepared transaction: directly when nothing is in use, otherwise everything at the next restart,
-/// so the running system never mixes old and new core files.
+void ClearBootFiles() {
+    for (const wchar_t* f : {L"plan.txt", L"rollback.txt", L"plan.done", L"rollback.done", L"plan.cancelled", L"trial", L"result.txt", L"rolledback"})
+        DeleteFileW(BootFile(f).c_str());
+}
+
+/// Writes the plan luupboot.exe applies at the next boot and the plan that undoes it. Paths are NT paths.
+bool WriteBootPlans(const Config& cfg, const std::vector<Op>& ops, std::wstring& error) {
+    std::wstring plan = L"LUUP 1\n", undo = L"LUUP 1\n";
+    for (auto& o : ops) {
+        std::wstring target = NtPath(TargetPath(cfg, o.path));
+        plan += o.staged.empty() ? L"D\t" + target + L"\n" : L"M\t" + NtPath(o.staged) + L"\t" + target + L"\n";
+    }
+    for (size_t i = ops.size(); i-- > 0;) {
+        std::wstring target = NtPath(TargetPath(cfg, ops[i].path));
+        undo += ops[i].backup.empty() ? L"D\t" + target + L"\n" : L"M\t" + NtPath(ops[i].backup) + L"\t" + target + L"\n";
+    }
+    ClearBootFiles();
+    // The plan goes last: its presence is what makes luupboot act.
+    if (!EnsureDirs(BootFile(L"plan.txt"), true) || !WriteUtf16(BootFile(L"rollback.txt"), undo) || !WriteUtf16(BootFile(L"plan.txt"), plan)) {
+        error = L"Nelze zapsat plán aktualizace do " + BootDir() + L": " + LastErrorText(GetLastError());
+        ClearBootFiles();
+        return false;
+    }
+    return true;
+}
+
+/// Applies a prepared transaction: directly when nothing is in use, otherwise everything at the next restart
+/// (luupboot.exe, before any Win32 process starts), so the running system never mixes old and new core files.
 InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std::vector<Op>& ops, std::wstring& message,
                        const Progress& progress) {
     bool restart = false;
@@ -215,33 +294,31 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
     txj["mode"] = restart ? "restart" : "direct";
     SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
 
-    std::vector<std::wstring> deleted;
     for (size_t i = 0; i < ops.size(); i++) {
         auto& o = ops[i];
         std::wstring target = TargetPath(cfg, o.path);
         if (progress) progress((int)(70 + 25 * i / std::max<size_t>(ops.size(), 1)), L"Nahrazuji " + Widen(o.path));
+        // luupboot cannot create folders, so they exist before the restart.
         if (!EnsureDirs(target, true)) {
             message = L"Nelze vytvořit složku pro " + Widen(o.path) + L": " + LastErrorText(GetLastError());
-            if (restart) UnscheduleRenames(tx, deleted); else UndoDirect(cfg, ops, i);
+            if (!restart) UndoDirect(cfg, ops, i);
             return InstallOutcome::Failed;
         }
-        BOOL ok;
-        if (o.staged.empty()) {
-            ok = restart ? MoveFileExW(target.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT) : (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND);
-            if (restart) deleted.push_back(target);
-        } else {
-            ok = MoveFileExW(o.staged.c_str(), target.c_str(),
-                             restart ? (MOVEFILE_DELAY_UNTIL_REBOOT | MOVEFILE_REPLACE_EXISTING)
-                                     : (MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH));
-        }
+        if (restart) continue;
+        BOOL ok = o.staged.empty() ? (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND)
+                                   : MoveFileExW(o.staged.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
         if (!ok) {
-            DWORD err = GetLastError();
-            message = L"Nelze nahradit " + Widen(o.path) + L": " + LastErrorText(err);
-            if (restart) UnscheduleRenames(tx, deleted); else UndoDirect(cfg, ops, i);
+            message = L"Nelze nahradit " + Widen(o.path) + L": " + LastErrorText(GetLastError());
+            UndoDirect(cfg, ops, i);
             return InstallOutcome::Failed;
         }
     }
-    if (restart) return InstallOutcome::PendingRestart;
+    if (restart) {
+        if (g_dataOverride.empty() && !EnsureBootApplier(message)) return InstallOutcome::Failed;
+        if (!WriteBootPlans(cfg, ops, message)) return InstallOutcome::Failed;
+        if (g_dataOverride.empty()) AddRecoveryEntry(cfg);
+        return InstallOutcome::PendingRestart;
+    }
 
     std::wstring bad;
     if (!VerifyTargets(cfg, ops, bad)) {
@@ -580,7 +657,7 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
         ops.push_back(o);
     }
     json txj{{"tx", tx}, {"kind", "install"}, {"release", check.latest.id}, {"commit", check.latest.commit},
-             {"installedBefore", check.installed}, {"ops", OpsToJson(ops)}, {"state", "prepared"}};
+             {"installedBefore", InstalledRelease()}, {"ops", OpsToJson(ops)}, {"state", "prepared"}};
     SaveJson(JoinPath(dir, L"tx.json"), txj);
     InstallOutcome r = RunTx(cfg, tx, txj, ops, hist, check.latest.id, message, progress);
     if (r == InstallOutcome::Installed) PruneTransactions(5);
@@ -596,26 +673,49 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
     if (hist.empty()) hist = NewHistory(tx, txj.value("kind", "install"), txj.value("release", ""), ops.size());
     json state = LoadState();
     state["pending"] = "";
+    std::vector<uint8_t> raw;
+    std::string bootResult = ReadFileBytes(BootFile(L"result.txt"), raw) ? Trim(std::string(raw.begin(), raw.end())) : "";
+    if (!bootResult.empty()) LogLine("luupboot: " + bootResult);
+
+    auto finish = [&](const char* txState, const char* result, const std::wstring& text, const std::string& installed) {
+        state["installed"] = installed;
+        SaveState(state);
+        txj["state"] = txState;
+        SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
+        message = text;
+        FinishHistory(hist, result, message);
+        RemoveRecoveryEntry(cfg);
+    };
+    std::string before = txj.value("installedBefore", state.value("installed", ""));
+    if (FileExists(BootFile(L"plan.txt"))) {
+        ClearBootFiles();
+        finish("failed", "failed", L"Program luupboot při startu neběžel, aktualizace " + Widen(tx) + L" se neprovedla.", before);
+        return true;
+    }
+    if (ReadFileBytes(BootFile(L"rolledback"), raw)) {
+        bool cancelled = std::string(raw.begin(), raw.end()).rfind("cancelled", 0) == 0;
+        ClearBootFiles();
+        if (cancelled)
+            finish("cancelled", "cancelled", L"Při startu byla zvolena položka pro návrat, aktualizace " + Widen(tx) + L" se neprovedla.", before);
+        else
+            finish("rolled-back", "failed", L"Systém se po aktualizaci " + Widen(tx) + L" nespustil, při startu jsou vrácené původní soubory.", before);
+        return true;
+    }
+
     std::wstring bad;
     if (!ops.empty() && VerifyTargets(cfg, ops, bad)) {
-        state["installed"] = txj.value("release", "");
-        SaveState(state);
-        txj["state"] = "done";
-        SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
-        message = L"Aktualizace " + Widen(tx) + L" dokončena po restartu (" + std::to_wstring(ops.size()) + L" souborů).";
-        FinishHistory(hist, "installed", message);
+        ClearBootFiles();
+        finish("done", "installed", L"Aktualizace " + Widen(tx) + L" dokončena po restartu (" + std::to_wstring(ops.size()) + L" souborů).",
+               txj.value("release", ""));
         PruneTransactions(5);
         return true;
     }
-    SaveState(state);
-    txj["state"] = "failed";
-    SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
-    message = L"Po restartu nesouhlasí " + bad + L"; vracím původní soubory.";
-    FinishHistory(hist, "failed", message);
+    ClearBootFiles();
+    finish("failed", "failed", L"Po restartu nesouhlasí " + bad + L"; vracím původní soubory.", before);
     std::wstring rb;
     InstallOutcome r = RevertTx(cfg, tx, "auto-rollback", rb, nullptr);
     message += L" " + rb;
-    if (r == InstallOutcome::PendingRestart) RestartSystem(rb);
+    if (r == InstallOutcome::PendingRestart && g_dataOverride.empty()) RestartSystem(rb);
     return true;
 }
 
@@ -623,11 +723,9 @@ bool CancelPending(std::wstring& message) {
     std::string tx = PendingTransaction();
     if (tx.empty()) { message = L"Žádná aktualizace nečeká na restart."; return false; }
     json txj = LoadJson(JoinPath(TxDir(tx), L"tx.json"), json::object());
-    std::vector<std::wstring> deletes;
     Config cfg = LoadConfig();
-    for (auto& o : OpsFromJson(txj.value("ops", json::array())))
-        if (o.staged.empty()) deletes.push_back(TargetPath(cfg, o.path));
-    UnscheduleRenames(tx, deletes);
+    ClearBootFiles();
+    RemoveRecoveryEntry(cfg);
     json state = LoadState();
     state["pending"] = "";
     SaveState(state);
@@ -753,40 +851,47 @@ bool SelfTest(std::wstring& report) {
               !FileExists(JoinPath(root, L"Windows\\system32\\added.dll")),
           L"partial update: rollback touches only the changed file: " + msg);
 
-    // A file in use forces the restart path; without admin rights scheduling fails cleanly instead.
-    HANDLE lock = CreateFileW(JoinPath(root, L"Windows\\system32\\keep.dll").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    CheckResult c2;
-    c2.latest.id = "R3";
-    c2.changes = {{"Windows/system32/keep.dll", obj("keep v2"), 7, Sha256Hex("keep", 4)}};
-    r = InstallUpdate(cfg, c2, msg, nullptr);
-    if (r == InstallOutcome::PendingRestart) {
-        check(PendingTransaction().size() > 0, L"restart path: transaction pending");
-        // Cancel it again so the self-test leaves no rename behind.
-        std::string tx = PendingTransaction();
-        UnscheduleRenames(tx, {});
-        json st = LoadState();
-        st["pending"] = "";
-        SaveState(st);
-        HKEY key;
-        bool left = false;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kSessionManager, 0, KEY_QUERY_VALUE, &key) == ERROR_SUCCESS) {
-            DWORD size = 0;
-            std::vector<wchar_t> v(1 << 16);
-            size = (DWORD)(v.size() * sizeof(wchar_t));
-            if (RegQueryValueExW(key, L"PendingFileRenameOperations", nullptr, nullptr, (BYTE*)v.data(), &size) == ERROR_SUCCESS) {
-                std::wstring all(v.data(), size / sizeof(wchar_t));
-                std::transform(all.begin(), all.end(), all.begin(), ::towlower);
-                std::wstring m = L"\\tx\\" + Widen(tx) + L"\\";
-                std::transform(m.begin(), m.end(), m.begin(), ::towlower);
-                left = all.find(m) != std::wstring::npos;
-            }
-            RegCloseKey(key);
-        }
-        check(!left, L"restart path: scheduled renames removed again");
-    } else {
-        check(r == InstallOutcome::Failed && PendingTransaction().empty(), L"restart path without admin rights fails cleanly: " + msg);
-    }
-    if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+    // A file in use forces the restart path: luupboot's code applies the plan in-process here, as at boot.
+    std::wstring keep = JoinPath(root, L"Windows\\system32\\keep.dll"), extra = JoinPath(root, L"Windows\\system32\\extra.dll");
+    auto content = [&](const std::wstring& p) { return ReadFileBytes(p, b) ? std::string(b.begin(), b.end()) : std::string("<missing>"); };
+    auto installLocked = [&](const std::string& id, const std::string& text) {
+        HANDLE lock = CreateFileW(keep.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        CheckResult cr;
+        cr.latest.id = id;
+        cr.changes = {{"Windows/system32/keep.dll", obj(text), text.size(), Sha256File(keep)},
+                      {"Windows/system32/extra.dll", obj(id), id.size(), FileExists(extra) ? Sha256File(extra) : ""}};
+        InstallOutcome res = InstallUpdate(cfg, cr, msg, nullptr);
+        if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
+        return res;
+    };
+    std::wstring dataNt = NtPath(DataDir());
+    r = installLocked("R3", "keep v2");
+    check(r == InstallOutcome::PendingRestart && FileExists(BootFile(L"plan.txt")) && content(keep) == "keep",
+          L"restart path: plan written, files untouched: " + msg);
+    LuupBoot(dataNt.c_str(), FALSE, nullptr);
+    check(content(keep) == "keep v2" && content(extra) == "R3" && FileExists(BootFile(L"trial")), L"boot applies the plan");
+    check(FinalizePending(cfg, msg) && InstalledRelease() == "R3" && !FileExists(BootFile(L"trial")), L"service confirms the update");
+
+    r = installLocked("R4", "keep v3");
+    LuupBoot(dataNt.c_str(), FALSE, nullptr);
+    LuupBoot(dataNt.c_str(), FALSE, nullptr);  // second boot without the service: still waiting
+    check(content(keep) == "keep v3", L"one unconfirmed boot keeps the update");
+    LuupBoot(dataNt.c_str(), FALSE, nullptr);  // third boot without the service: roll back
+    check(content(keep) == "keep v2" && content(extra) == "R3", L"third unconfirmed boot rolls back");
+    check(FinalizePending(cfg, msg) && InstalledRelease() == "R3", L"service records the boot rollback");
+
+    r = installLocked("R5", "keep v4");
+    LuupBoot(dataNt.c_str(), TRUE, nullptr);  // recovery entry chosen before the plan ran
+    check(content(keep) == "keep v2" && FinalizePending(cfg, msg) && InstalledRelease() == "R3", L"recovery boot cancels a pending plan");
+
+    r = installLocked("R6", "keep v5");
+    LuupBoot(dataNt.c_str(), FALSE, nullptr);
+    LuupBoot(dataNt.c_str(), TRUE, nullptr);  // recovery entry chosen after the plan ran
+    check(content(keep) == "keep v2" && content(extra) == "R3" && FinalizePending(cfg, msg), L"recovery boot rolls back an applied plan");
+
+    r = installLocked("R7", "keep v6");
+    check(r == InstallOutcome::PendingRestart && CancelPending(msg) && !FileExists(BootFile(L"plan.txt")) && PendingTransaction().empty(),
+          L"/cancel drops the plan");
     check(LoadHistory().size() >= 3, L"history has the transactions");
 
     // Full check against a signed file:/// feed: MP kernel variant, a file Setup left out, a new file.

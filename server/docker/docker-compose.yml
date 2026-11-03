@@ -1,0 +1,19 @@
+# Update server: serves the feed directory that luup.py publishes (feed.json, feed.json.sig, releases/, objects/).
+# build-release.sh pushes new releases into ./feed with rsync (FEED_PUSH), objects first and feed.json last.
+services:
+  web:
+    image: nginx:1.31-alpine
+    container_name: libernt-update-web
+    restart: unless-stopped
+    ports:
+      - "${LUUP_PORT:-8080}:80"
+    volumes:
+      - ./feed:/usr/share/nginx/html:ro
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    environment:
+      - TZ=Europe/Prague
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
