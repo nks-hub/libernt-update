@@ -18,9 +18,10 @@ set FEEDDEF=
 if defined LNTU_FEED_URL set FEEDDEF=/DLNTU_FEED_URL=L\"%LNTU_FEED_URL%\"
 set VERDEF=
 if defined LNTU_VERSION set VERDEF=/DLNTU_VERSION=\"%LNTU_VERSION%\"
+rc /nologo /fo out\app.res res\app.rc || exit /b 1
 cl /nologo /std:c++17 /O2 /EHsc /W3 /MT /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN %FEEDDEF% %VERDEF% /Fo:out\ ^
    src\main.cpp src\gui.cpp src\engine.cpp src\http.cpp src\util.cpp src\sha256.cpp boot\bootplan.c ^
    third_party\monocypher\monocypher.c third_party\monocypher\monocypher-ed25519.c ^
-   /Fe:out\LiberNTUpdate.exe /link /SUBSYSTEM:WINDOWS ^
+   /Fe:out\LiberNTUpdate.exe /link /SUBSYSTEM:WINDOWS out\app.res ^
    wininet.lib comctl32.lib shell32.lib advapi32.lib user32.lib gdi32.lib ntdll.lib
 exit /b %errorlevel%

@@ -344,7 +344,11 @@ void RefreshTray(HWND w) {
         g_nid.dwInfoFlags = NIIF_INFO;
         g_announced = about;
     }
-    Shell_NotifyIconW(g_iconShown ? NIM_MODIFY : NIM_ADD, &g_nid);
+    if (!Shell_NotifyIconW(g_iconShown ? NIM_MODIFY : NIM_ADD, &g_nid)) {
+        LogLine("tray: Shell_NotifyIcon failed: " + Narrow(LastErrorText(GetLastError())));
+        return;
+    }
+    if (!g_iconShown) LogLine("tray: icon shown for " + about);
     g_iconShown = true;
 }
 
@@ -410,7 +414,7 @@ int RunTray(HINSTANCE inst) {
     g_nid.hWnd = w;
     g_nid.uID = 1;
     g_nid.uCallbackMessage = WmTray;
-    g_nid.hIcon = LoadIconW(nullptr, IDI_INFORMATION);
+    g_nid.hIcon = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     RefreshTray(w);
     SetTimer(w, 1, 30 * 1000, nullptr);
     MSG m;
