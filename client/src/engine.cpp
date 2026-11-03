@@ -886,8 +886,86 @@ Status LoadStatus() {
     return s;
 }
 
+#ifndef LNTU_VERSION
+#define LNTU_VERSION "dev"
+#endif
+const char* ClientVersion() { return LNTU_VERSION; }
+
+void ServiceHousekeeping() {
+    std::wstring exe = OwnExe(), dir = exe.substr(0, exe.find_last_of(L'\\'));
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW(JoinPath(dir, L"*.old-*").c_str(), &fd);
+    if (f != INVALID_HANDLE_VALUE) {
+        do {
+            std::wstring p = JoinPath(dir, fd.cFileName);
+            LogLine("housekeeping: " + Narrow(p) + (DeleteFileW(p.c_str()) ? " removed" : " still in use"));
+        } while (FindNextFileW(f, &fd));
+        FindClose(f);
+    }
+    std::wstring err;
+    if (!EnsureBootApplier(err)) LogLine("housekeeping: luupboot: " + Narrow(err));
+}
+
+/// Stops the service if it runs, starts it again and requires it to stay running for 30 s.
+bool RestartService(std::wstring& error) {
+    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    SC_HANDLE svc = scm ? OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP) : nullptr;
+    bool ok = false;
+    if (!svc) {
+        error = L"Službu LiberNTUpdate nelze otevřít: " + LastErrorText(GetLastError());
+    } else {
+        SERVICE_STATUS s{};
+        if (QueryServiceStatus(svc, &s) && s.dwCurrentState == SERVICE_RUNNING) ControlService(svc, SERVICE_CONTROL_STOP, &s);
+        for (int i = 0; i < 120 && QueryServiceStatus(svc, &s) && s.dwCurrentState != SERVICE_STOPPED; i++) Sleep(500);
+        if (!StartServiceW(svc, 0, nullptr)) {
+            error = L"Službu LiberNTUpdate nelze spustit: " + LastErrorText(GetLastError());
+        } else {
+            ok = true;
+            for (int i = 0; ok && i < 30; i++) {
+                Sleep(1000);
+                ok = QueryServiceStatus(svc, &s) && (s.dwCurrentState == SERVICE_RUNNING || s.dwCurrentState == SERVICE_START_PENDING);
+            }
+            if (!ok) error = L"Služba LiberNTUpdate po spuštění skončila (stav " + std::to_wstring(s.dwCurrentState) + L", kód " +
+                             std::to_wstring(s.dwWin32ExitCode) + L").";
+        }
+    }
+    LogLine(ok ? "service restarted and running for 30 s" : "service restart failed: " + Narrow(error));
+    if (svc) CloseServiceHandle(svc);
+    if (scm) CloseServiceHandle(scm);
+    return ok;
+}
+
+/// Runs from the previous client's exe (moved aside by a self-update): restarts the service with the new client and
+/// rolls the update back when the new client does not keep the service running.
+bool WatchSelfUpdate(const std::string& tx) {
+    LogLine(std::string("self-update watchdog (client ") + ClientVersion() + ") for tx " + tx);
+    std::wstring err;
+    if (RestartService(err)) return true;
+    std::wstring msg;
+    InstallOutcome r = RevertTx(LoadConfig(), tx, "auto-rollback", msg, nullptr);
+    LogLine("self-update failed, rollback of " + tx + ": " + Narrow(msg));
+    RestartService(err);
+    return r == InstallOutcome::Installed;
+}
+
+/// After a self-update in the service: the previous exe (still on disk under the aside name) becomes the watchdog.
+bool StartSelfUpdateWatchdog(const std::string& tx) {
+    std::wstring aside = OwnExe() + L".old-" + Widen(tx);
+    std::wstring cmd = L"\"" + aside + L"\" /watch-self-update " + Widen(tx);
+    STARTUPINFOW si{sizeof si};
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(aside.c_str(), &cmd[0], nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
+        LogLine("self-update: cannot start the watchdog " + Narrow(aside) + ": " + Narrow(LastErrorText(GetLastError())));
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return true;
+}
+
 void RunAutomatic(void* stopEvent) {
     std::wstring statusPath = JoinPath(DataDir(), L"status.json");
+    LogLine(std::string("service: client ") + ClientVersion() + " running");
     for (;;) {
         Config cfg = LoadConfig();
         json st = LoadJson(statusPath, json::object());
@@ -898,13 +976,20 @@ void RunAutomatic(void* stopEvent) {
             bool ok = CheckForUpdate(cfg, c, err, nullptr);
             st = json{{"checkedEpoch", now}, {"checked", NowIso()}, {"latest", c.latest.id}, {"changes", ok ? (int)c.changes.size() : 0},
                       {"error", Narrow(err)}};
+            std::string selfTx;
             if (ok && !c.changes.empty() && cfg.autoMode == "install") {
+                std::string before = Sha256File(OwnExe());
                 InstallOutcome r = InstallUpdate(cfg, c, msg, nullptr);
                 LogLine("auto install " + c.latest.id + ": " + Narrow(msg));
                 if (r == InstallOutcome::Installed) st["changes"] = 0;
                 if (r == InstallOutcome::Failed) st["error"] = Narrow(msg);
+                if (r == InstallOutcome::Installed && Sha256File(OwnExe()) != before && !LoadHistory().empty()) selfTx = LoadHistory().front().tx;
             }
             SaveJson(statusPath, st);
+            if (!selfTx.empty() && StartSelfUpdateWatchdog(selfTx)) {
+                LogLine("self-update: service stops, the watchdog starts the new client");
+                return;
+            }
         }
         if (!PendingTransaction().empty() && cfg.restartHour >= 0) {
             SYSTEMTIME t;

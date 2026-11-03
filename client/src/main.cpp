@@ -58,6 +58,7 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
     ReportService(SERVICE_RUNNING);
     std::wstring msg;
     if (FinalizePending(LoadConfig(), msg)) LogLine("service: " + Narrow(msg));
+    ServiceHousekeeping();
     RunAutomatic(g_stop);
     ReportService(SERVICE_STOPPED);
 }
@@ -142,6 +143,21 @@ int Cli(const std::wstring& cmd) {
         Out(L"automatic updates: service LiberNTUpdate and the tray icon are registered (auto=" + Widen(cfg.autoMode) +
             L", every " + std::to_wstring(cfg.checkMinutes) + L" min, restart hour " + std::to_wstring(cfg.restartHour) + L")");
         return 0;
+    }
+    if (cmd == L"/version") {
+        Out(Widen(ClientVersion()));
+        return 0;
+    }
+    if (cmd == L"/restart-service") {
+        std::wstring err;
+        return RestartService(err) ? 0 : 6;
+    }
+    if (cmd == L"/watch-self-update") {
+        int argc = 0;
+        LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        std::string tx = argc > 2 ? Narrow(argv[2]) : "";
+        LocalFree(argv);
+        return !tx.empty() && WatchSelfUpdate(tx) ? 0 : 7;
     }
     if (cmd == L"/status") {
         Status s = LoadStatus();

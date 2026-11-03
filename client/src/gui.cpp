@@ -284,7 +284,8 @@ int RunGui(HINSTANCE inst) {
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     wc.lpszClassName = L"LiberNTUpdateWindow";
     RegisterClassExW(&wc);
-    HWND w = CreateWindowExW(0, wc.lpszClassName, L"LiberNT Update", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 900, 680,
+    std::wstring title = L"LiberNT Update " + Widen(ClientVersion());
+    HWND w = CreateWindowExW(0, wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 900, 680,
                              nullptr, nullptr, inst, nullptr);
     ShowWindow(w, SW_SHOW);
     MSG m;

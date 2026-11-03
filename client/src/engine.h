@@ -30,6 +30,19 @@ Status LoadStatus();
 /// Registers the boot-time service and the tray icon (HKLM Run) for automatic updates.
 bool RegisterAutomatic(std::wstring& error);
 
+/// Client version, set at build time (LNTU_VERSION), "dev" for local builds.
+const char* ClientVersion();
+
+/// Service start: removes the client files an earlier self-update moved aside and installs the current luupboot.exe.
+void ServiceHousekeeping();
+
+/// Stops the LiberNTUpdate service if it runs, starts it and requires it to stay running for 30 s.
+bool RestartService(std::wstring& error);
+
+/// Run from the previous client's exe after a self-update: restarts the service with the new client and rolls the
+/// transaction back when the new client does not keep running.
+bool WatchSelfUpdate(const std::string& tx);
+
 struct Change {
     std::string path;    ///< manifest path, forward slashes, relative to the root
     std::string newSha;
