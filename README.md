@@ -1,6 +1,7 @@
 # LiberNT Update
 
 [![CI](https://github.com/nks-hub/libernt-update/actions/workflows/ci.yml/badge.svg)](https://github.com/nks-hub/libernt-update/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/nks-hub/libernt-update?include_prereleases)](https://github.com/nks-hub/libernt-update/releases)
 [![Platform](https://img.shields.io/badge/platform-LiberNT%20amd64-blue)](https://github.com/nks-hub/LiberNT)
 [![C++](https://img.shields.io/badge/C%2B%2B-17-00599C)](client/build.cmd)
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB)](server/luup.py)
@@ -8,23 +9,28 @@
 
 Updates an installed [LiberNT](https://github.com/nks-hub/LiberNT) system to a newer build file by file, with backups and rollback, instead of reinstalling it.
 
-`server/luup.py` runs on the build machine: it reads the NTFS system partition of `LiberNT.img` (`ninja liberntimg`), hashes the serviced files under `Windows/`, `Program Files/` and `Program Files (x86)/`, and publishes a release. `client/` builds `LiberNTUpdate.exe` (Win32, C++17, static CRT), which runs inside LiberNT. Its user interface is in Czech.
+`server/luup.py` runs on the build machine: it reads `LiberNT.img` (`ninja liberntimg`), hashes the serviced files and publishes a signed release. `client/` builds `LiberNTUpdate.exe` (Win32, C++17, static CRT), which runs inside LiberNT, and `luupboot.exe`, a native program that replaces files at boot. The client's user interface is in Czech.
 
 ## Features
 
 - 🔏 **Signed feed** - `feed.json` is checked against the Ed25519 key compiled into the client; manifests and files are checked by SHA-256.
 - 🔍 **Diff against the disk** - only files whose contents differ from the release are downloaded, whatever build the machine started from.
 - 🧩 **Setup variants** - the kernel and HAL keep the variant Setup installed (`ntoskrnl.exe` copied from `ntkrnlmp.exe` on multiprocessor machines).
-- 🔁 **Restart-time replacement** - when any changed file is in use, every changed file is replaced together at the next boot through `PendingFileRenameOperations`, so old and new core files never run side by side.
-- ✅ **Boot verification** - the `LiberNTUpdate` service checks every replaced file after the restart and rolls the update back when one does not match; the rollback restores only the files that actually changed.
-- ⏪ **Rollback and history** - each update keeps a backup of the files it replaced; the last update can be undone, a pending one cancelled, and every transaction is listed.
-- 📦 **Releases only on change** - a commit whose image carries the same files as the previous release is not published again.
+- 🔁 **Boot-time replacement** - when any changed file is in use, `luupboot.exe` (registered in `BootExecute`) replaces every changed file together at the next boot, before any Win32 process starts. The plan is a file, so the size of an update does not depend on the registry.
+- ✅ **Boot verification** - the `LiberNTUpdate` service checks every replaced file after the restart and rolls the update back when one does not match; a rollback restores only the files that actually changed.
+- 🛟 **Recovery after a failed boot** - when two boots after an update never reach the service, `luupboot.exe` restores the previous files on the third. During an update `freeldr.ini` gets the entry "LiberNT (undo the last update)", which starts the previous kernel and HAL and undoes the update at once.
+- 🔄 **Automatic updates** - the service checks the feed (every 6 hours by default), installs what it finds and restarts at 3:00 when an update waits for a restart. A tray icon announces updates and offers the restart.
+- 🆙 **Self-update** - every release carries the newest client from GitHub releases. The running client is renamed aside and replaced without a restart; its previous exe restarts the service and rolls the update back when the new client does not keep running for 30 seconds.
+- 🥾 **Boot loaders** - `freeldr.sys`, `rosload.exe`, `bootx64.efi` and `bootmgfw.efi` from the image's boot partition replace the installed ones (system drive root on BIOS installs, EFI system partition on UEFI); `BCD` is never touched.
+- 📝 **Logging** - every step, every failed file, every undo and every line `luupboot.exe` could not apply goes to `%ProgramData%\LiberNTUpdate\update.log`.
+- ⏪ **History** - each update keeps a backup of the files it replaced; the last update can be undone, a pending one cancelled, and every transaction is listed.
 
 ## Requirements
 
-- Build machine: Debian 13 (or another Linux) with `python3` 3.12+, `python3-nacl`, `p7zip-full` and a configured LiberNT build tree.
-- Client build: Visual Studio 2022 or newer with the x64 C++ tools.
-- Target: LiberNT amd64 with a kernel from [nks-hub/LiberNT](https://github.com/nks-hub/LiberNT) branch `nks` (see [Limitations](#limitations)).
+- Build machine: Python 3.12+ with PyNaCl, 7-Zip (`7z`) and a configured LiberNT build tree. It runs wherever LiberNT is built; Linux (Debian 13, `python3-nacl`, `p7zip-full`) is what `build-release.sh` and the systemd units assume.
+- Client build: Visual Studio 2022 or newer with the x64 C++ tools and the Windows SDK (`ntdll.lib` for `luupboot.exe`).
+- Target: LiberNT amd64.
+- Update server: any static HTTP server; `server/docker/` has an nginx container.
 
 ## Installation
 
@@ -34,19 +40,33 @@ Create the signing key once and put its public half into the client:
 python3 server/luup.py keygen --key /opt/luup/signing.key     # prints the public key
 ```
 
-Replace `kFeedPublicKeyHex` in `client/src/pubkey.h` with that key, then build the client on Windows:
+Replace `kFeedPublicKeyHex` in `client/src/pubkey.h` with that key and build on Windows (`LNTU_FEED_URL` and `LNTU_VERSION` are optional):
 
 ```bat
+set LNTU_FEED_URL=http://updates.example.org/
 client\build.cmd
 ```
 
-Copy `client\out\LiberNTUpdate.exe` into LiberNT (for example to `C:\Program Files\LiberNT Update\`) and create `%ProgramData%\LiberNTUpdate\config.json`:
+Copy `client\out\LiberNTUpdate.exe` and `client\out\luupboot.exe` into LiberNT (`C:\Program Files\LiberNT Update\`) and enable automatic updates:
 
-```json
-{"feedUrl": "http://updates.example.org/", "root": "C:\\"}
+```bat
+start "" /wait "C:\Program Files\LiberNT Update\LiberNTUpdate.exe" /register
 ```
 
-`set LNTU_FEED_URL=http://updates.example.org/` before `build.cmd` compiles a default feed URL into the client instead.
+## Configuration
+
+`%ProgramData%\LiberNTUpdate\config.json`, every key optional:
+
+```json
+{"feedUrl": "http://updates.example.org/", "root": "C:\\", "auto": "install", "checkMinutes": 360, "restartHour": 3}
+```
+
+| Key | Meaning |
+|---|---|
+| `feedUrl` | feed address; overrides the one compiled in |
+| `auto` | `install` checks and installs, `notify` only checks (the tray icon announces it), `off` |
+| `checkMinutes` | interval of the automatic check |
+| `restartHour` | local hour of the automatic restart for a pending update, `-1` never |
 
 ## Usage
 
@@ -54,11 +74,10 @@ Publish a release from a finished build and check the feed:
 
 ```sh
 python3 server/luup.py publish --key /opt/luup/signing.key --feed /srv/luup \
-        --img output-Clang-amd64-debug/LiberNT.img --commit "$(git rev-parse HEAD)" --repo .
+        --img output-Clang-amd64-debug/LiberNT.img --commit "$(git rev-parse HEAD)" --repo . \
+        --client /path/to/unpacked/client/release
 python3 server/luup.py verify  --feed /srv/luup --pub "$(cat /opt/luup/signing.pub)"
 ```
-
-Serve `/srv/luup` over HTTP (`python3 -m http.server 8080 --directory /srv/luup` is enough on a LAN).
 
 Inside LiberNT, `LiberNTUpdate.exe` without arguments opens the window. The command line does the same work:
 
@@ -71,13 +90,17 @@ Inside LiberNT, `LiberNTUpdate.exe` without arguments opens the window. The comm
 | `/cancel` | withdraw an update that waits for a restart |
 | `/finalize` | finish a pending update (the service does this at boot) |
 | `/history` | list past updates |
+| `/register` | register the service and the tray icon |
+| `/status` | result of the last automatic check |
+| `/version` | client version |
 | `/selftest` | built-in checks |
 
 The program is a GUI-subsystem executable, so command-line output also goes to `%ProgramData%\LiberNTUpdate\cli-output.txt`; from `cmd.exe` run it with `start "" /wait LiberNTUpdate.exe /check`.
 
-## Automatic releases
+## Releases
 
-`server/build-release.sh` fetches branch `nks` of nks-hub/LiberNT, runs `ninja liberntimg` and publishes the image when the commit is not in the feed yet. `server/systemd/luup-release.timer` runs it daily at 04:30 UTC, after the fork's GitHub workflow has merged upstream `main-nt10` into `nks` at 03:17 UTC.
+- **Client** - pushing a tag `v*` builds the client with that version, runs the self-test and attaches `LiberNTUpdate.exe`, `luupboot.exe` and `SHA256SUMS` to a GitHub release (`.github/workflows/release.yml`).
+- **System** - `server/build-release.sh` fetches branch `nks` of nks-hub/LiberNT and the newest client release (checked against `SHA256SUMS`), runs `ninja liberntimg` and publishes when the LiberNT commit or the client version is new. With `FEED_PUSH=user@host:` it copies the feed to the update server with rsync, objects first and the signed `feed.json` last. `server/systemd/luup-release.timer` runs it daily at 04:30 UTC, after the fork's GitHub workflow has merged upstream `main-nt10` into `nks` at 03:17 UTC.
 
 ```sh
 install -m 755 server/build-release.sh /opt/luup/build-release.sh
@@ -86,19 +109,27 @@ cp server/systemd/luup-release.* /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now luup-release.timer
 ```
 
-`SRC`, `OUT`, `FEED`, `KEY` and `LUUP` override the default paths.
+`SRC`, `OUT`, `FEED`, `KEY`, `LUUP`, `CLIENT_REPO`, `CLIENT_CACHE`, `FEED_PUSH` and `PUSH_KEY` override the defaults.
+
+## Update server
+
+```sh
+cd server/docker && mkdir feed && LUUP_PORT=8080 docker compose up -d
+```
+
+nginx serves `feed/` read-only with `no-cache` on `feed.json` and long caching for the immutable `objects/` and `releases/`. Clients can use plain HTTP: the feed is signed and every file is checked by hash.
 
 ## Limitations
 
 - Registry changes of a new build (new drivers or services in `hivesys.inf`) are not applied.
-- The EFI partition (boot manager, `BCD`) is not updated.
-- A build that does not boot cannot be rolled back from inside the system; take a VM snapshot first.
-- Kernels without nks-hub/LiberNT commit `2f303f8` (`fix: mark every hive block a dirty registry cell spans`) write only the first 4 KB block of a large registry value to disk. A `PendingFileRenameOperations` list of several hundred files then reaches the next boot mixed with older entries and only part of the update lands. On such a system copy the new `ntkrnlmp.exe` (or `ntoskrnl.exe` on single-CPU machines) over `system32\ntoskrnl.exe`, restart, then update.
+- A boot-start driver that crashes before smss runs stops `luupboot.exe` too; the recovery entry starts the previous kernel and HAL but the new boot drivers. Take a VM snapshot before trying risky builds.
+- A new boot loader that does not start cannot be undone from inside the system; its backup stays in the transaction folder.
+- Loader replacement on UEFI installs has not been tested on a UEFI machine yet.
 
 ## Testing
 
 ```sh
-python3 server/luup.py test      # publisher: diff, dedup, exclusions, variants, skipped empty release, signature
+python3 server/luup.py test      # diff, dedup, exclusions, variants, boot files, client overlay, skipped release, signature
 ```
 
 ```bat
@@ -107,7 +138,7 @@ start "" /wait client\out\LiberNTUpdate.exe /selftest
 type %ProgramData%\LiberNTUpdate\cli-output.txt
 ```
 
-The client self-test covers SHA-256 and Ed25519 vectors, direct install, rollback (including a partly applied update), the restart path (scheduling and cancelling restart-time renames) and a full check against a signed local feed with kernel variants. CI runs both on every push.
+The client self-test covers SHA-256 and Ed25519 vectors, direct install, rollback (including a partly applied update), the boot plan as `luupboot.exe` applies it, the boot-failure and recovery-entry rollbacks, `/cancel`, and a full check against a signed local feed with kernel variants. CI runs both on every push.
 
 ## Contributing
 
