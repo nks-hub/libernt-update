@@ -506,7 +506,11 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
         for (auto& c : al.value("candidates", json::array())) {
             std::string k = c.get<std::string>();
             std::transform(k.begin(), k.end(), k.begin(), ::tolower);
-            if (k != t && !local[k].empty() && local[k] == local[t]) { wanted[t] = newSha[k]; break; }
+            // The target matches the variant as it is installed here, or already its new version.
+            if (k != t && !newSha[k].empty() && (newSha[k] == local[t] || (!local[k].empty() && local[k] == local[t]))) {
+                wanted[t] = newSha[k];
+                break;
+            }
         }
     }
 
@@ -835,6 +839,16 @@ bool SelfTest(std::wstring& report) {
         CheckResult again;
         CheckForUpdate(cfg2, again, err, nullptr);
         check(again.changes.empty(), L"second check finds nothing to do");
+
+        // The new MP kernel copied over ntoskrnl.exe by hand stays; it is not swapped for the UP one.
+        std::wstring root3 = JoinPath(base, L"root3");
+        put(JoinPath(root3, L"Windows\\system32\\ntoskrnl.exe"), "MP2");
+        put(JoinPath(root3, L"Windows\\system32\\ntkrnlmp.exe"), "MP1");
+        CheckResult hand;
+        CheckForUpdate(Config{cfg.feedUrl, root3}, hand, err, nullptr);
+        bool kernelTouched = false;
+        for (auto& x : hand.changes) kernelTouched = kernelTouched || x.path == "Windows/system32/ntoskrnl.exe";
+        check(!kernelTouched, L"kernel already at the new MP version is kept");
         put(JoinPath(feed, L"feed.json"), fraw + " ");
         check(!CheckForUpdate(cfg2, again, err, nullptr), L"tampered feed rejected");
         g_testPubKey.clear();
