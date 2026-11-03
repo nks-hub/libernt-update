@@ -125,7 +125,8 @@ nginx serves `feed/` read-only with `no-cache` on `feed.json` and long caching f
 - Registry changes of a new build (new drivers or services in `hivesys.inf`) are not applied.
 - A boot-start driver that crashes before smss runs stops `luupboot.exe` too; the recovery entry starts the previous kernel and HAL but the new boot drivers. Take a VM snapshot before trying risky builds.
 - A new boot loader that does not start cannot be undone from inside the system; its backup stays in the transaction folder.
-- Loader replacement on UEFI installs has not been tested on a UEFI machine yet.
+- Loader replacement on the EFI system partition is tested on a FAT volume found by volume enumeration (install, check, rollback); booting a UEFI machine after such an update is not tested yet.
+- In LiberNT's modern taskbar a new tray icon sits in the overflow until the user pins it, and announcements go to the notification center.
 
 ## Testing
 
