@@ -99,6 +99,15 @@ void RefreshInfo() {
     EnableWindow(g_btn[3], !g_busy);
 }
 
+/// Keyboard focus on the first enabled button when nothing in the window has it (at start, after a job disabled the
+/// buttons), so Tab, Enter and the Alt shortcuts work.
+void FocusFirstButton() {
+    HWND f = GetFocus();
+    if (f && f != g_wnd && IsWindowEnabled(f)) return;
+    for (HWND b : g_btn)
+        if (IsWindowEnabled(b)) { SetFocus(b); return; }
+}
+
 void ShowCheck() {
     ListView_DeleteAllItems(g_changes);
     int row = 0;
@@ -171,7 +180,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             g_wnd = w;
             g_info = Make(L"STATIC", L"", SS_LEFT, 0);
             SendMessageW(g_info, WM_SETFONT, (WPARAM)g_bold, TRUE);
-            const wchar_t* labels[4] = {L"Zkontrolovat", L"Nainstalovat", L"Vrátit poslední", L"Restartovat"};
+            const wchar_t* labels[4] = {L"&Zkontrolovat", L"&Nainstalovat", L"&Vrátit poslední", L"&Restartovat"};
             for (int i = 0; i < 4; i++) g_btn[i] = Make(L"BUTTON", labels[i], BS_PUSHBUTTON | WS_TABSTOP, IdCheck + i);
             g_progress = Make(PROGRESS_CLASSW, L"", 0, 0);
             SendMessageW(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
@@ -200,6 +209,9 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             Start(Job::Check);
             return 0;
         }
+        case WM_ACTIVATE:
+            if (LOWORD(wp) != WA_INACTIVE) FocusFirstButton();
+            return 0;
         case WM_SIZE:
             Layout(LOWORD(lp), HIWORD(lp));
             return 0;
@@ -254,6 +266,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             if (d->job != Job::Check && d->outcome == InstallOutcome::Installed) Start(Job::Check);
             RefreshHistory();
             RefreshInfo();
+            FocusFirstButton();
             SendMessageW(g_progress, PBM_SETPOS, 100, 0);
             return 0;
         }
