@@ -1003,7 +1003,18 @@ void RunAutomatic(void* stopEvent) {
             st = json{{"checkedEpoch", now}, {"checked", NowIso()}, {"latest", c.latest.id}, {"changes", ok ? (int)c.changes.size() : 0},
                       {"error", Narrow(err)}};
             std::string selfTx;
-            if (ok && !c.changes.empty() && cfg.autoMode == "install") {
+            // A release that failed or was rolled back on this machine is not retried automatically; a person
+            // decides (window or /install), otherwise a broken release would be installed and undone forever.
+            bool failedHere = false;
+            for (auto& e : LoadJson(JoinPath(DataDir(), L"history.json"), json::array()))
+                if (e.value("kind", "") == "install" && e.value("release", "") == c.latest.id &&
+                    (e.value("result", "") == "failed" || e.contains("rolledBackBy")))
+                    failedHere = true;
+            if (ok && !c.changes.empty() && cfg.autoMode == "install" && failedHere) {
+                st["error"] = "release " + c.latest.id + " failed or was rolled back here; install it by hand to retry";
+                LogLine("auto: " + st["error"].get<std::string>());
+            }
+            if (ok && !c.changes.empty() && cfg.autoMode == "install" && !failedHere) {
                 std::string before = Sha256File(OwnExe());
                 InstallOutcome r = InstallUpdate(cfg, c, msg, nullptr);
                 LogLine("auto install " + c.latest.id + ": " + Narrow(msg));
