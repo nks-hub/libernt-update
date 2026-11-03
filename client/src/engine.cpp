@@ -225,14 +225,14 @@ bool EnsureBootApplier(std::wstring& error) {
     GetSystemDirectoryW(sys, MAX_PATH);
     std::wstring src = JoinPath(std::wstring(exe).substr(0, std::wstring(exe).find_last_of(L'\\')), L"luupboot.exe");
     std::wstring dst = JoinPath(sys, L"luupboot.exe");
-    if (!FileExists(src)) { error = src + L" chybí."; return false; }
+    if (!FileExists(src)) { error = src + Tr(L" chybí.", L" is missing."); return false; }
     if (Sha256File(src) != Sha256File(dst) && !CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
         error = L"Nelze nainstalovat " + dst + L": " + LastErrorText(GetLastError());
         return false;
     }
     HKEY key;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kSessionManager, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
-        error = L"Nelze otevřít Session Manager v registru.";
+        error = Tr(L"Nelze otevřít Session Manager v registru.", L"Cannot open Session Manager in the registry.");
         return false;
     }
     std::vector<wchar_t> buf(4096, 0);
@@ -299,9 +299,10 @@ std::wstring UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t ap
         if (!failed++) first = Widen(ops[i].path);
     }
     LogLine("tx " + tx + ": undo of " + std::to_string(applied) + " files, " + std::to_string(failed) + " failed");
-    if (!failed) return L" Původní soubory jsou vrácené.";
-    return L" POZOR: " + std::to_wstring(failed) + L" souborů se nepodařilo vrátit (první " + first + L"), zálohy zůstávají v " + TxDir(tx) +
-           L" a podrobnosti jsou v update.log.";
+    if (!failed) return Tr(L" Původní soubory jsou vrácené.", L" The previous files are back.");
+    return Tr(L" POZOR: nepodařilo se vrátit souborů: ", L" WARNING: files that could not be restored: ") + std::to_wstring(failed) +
+           Tr(L" (první ", L" (first ") + first + Tr(L"), zálohy zůstávají v ", L"); the backups stay in ") + TxDir(tx) +
+           Tr(L" a podrobnosti jsou v update.log.", L" and update.log has the details.");
 }
 
 /// Checks every replaced file against its expected hash; logs each mismatch, bad = the first one and the count.
@@ -315,7 +316,7 @@ bool VerifyTargets(const Config& cfg, const std::vector<Op>& ops, std::wstring& 
                 (o.newSha.empty() ? std::string("no file") : o.newSha.substr(0, 16)));
         if (!mismatches++) bad = Widen(o.path);
     }
-    if (mismatches > 1) bad += L" a dalších " + std::to_wstring(mismatches - 1) + L" souborů";
+    if (mismatches > 1) bad += Tr(L" a další soubory: ", L" and more files: ") + std::to_wstring(mismatches - 1);
     return mismatches == 0;
 }
 
@@ -353,7 +354,7 @@ bool WriteBootPlans(const Config& cfg, const std::vector<Op>& ops, std::wstring&
     ClearBootFiles();
     // The plan goes last: its presence is what makes luupboot act.
     if (!EnsureDirs(BootFile(L"plan.txt"), true) || !WriteUtf16(BootFile(L"rollback.txt"), undo) || !WriteUtf16(BootFile(L"plan.txt"), plan)) {
-        error = L"Nelze zapsat plán aktualizace do " + BootDir() + L": " + LastErrorText(GetLastError());
+        error = Tr(L"Nelze zapsat plán aktualizace do ", L"Cannot write the update plan to ") + BootDir() + L": " + LastErrorText(GetLastError());
         ClearBootFiles();
         return false;
     }
@@ -378,7 +379,7 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
         if (progress) progress((int)(70 + 25 * i / std::max<size_t>(ops.size(), 1)), L"Nahrazuji " + Widen(o.path));
         // luupboot cannot create folders, so they exist before the restart.
         if (!EnsureDirs(target, true)) {
-            message = L"Nelze vytvořit složku pro " + Widen(o.path) + L": " + LastErrorText(GetLastError());
+            message = Tr(L"Nelze vytvořit složku pro ", L"Cannot create the folder for ") + Widen(o.path) + L": " + LastErrorText(GetLastError());
             LogLine("tx " + tx + ": " + Narrow(message));
             if (!restart) message += UndoDirect(cfg, ops, i, tx);
             return InstallOutcome::Failed;
@@ -389,7 +390,7 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
         if (!o.staged.empty() && IsClientFile(o.path) && InUse(target)) {
             aside = target + L".old-" + Widen(tx);
             if (!MoveFileExW(target.c_str(), aside.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-                message = L"Nelze odsunout běžící " + Widen(o.path) + L": " + LastErrorText(GetLastError());
+                message = Tr(L"Nelze odsunout běžící ", L"Cannot move aside the running ") + Widen(o.path) + L": " + LastErrorText(GetLastError());
                 LogLine("tx " + tx + ": " + Narrow(message));
                 message += UndoDirect(cfg, ops, i, tx);
                 return InstallOutcome::Failed;
@@ -399,7 +400,7 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
         BOOL ok = o.staged.empty() ? (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND)
                                    : MoveFileExW(o.staged.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
         if (!ok) {
-            message = L"Nelze nahradit " + Widen(o.path) + L": " + LastErrorText(GetLastError());
+            message = Tr(L"Nelze nahradit ", L"Cannot replace ") + Widen(o.path) + L": " + LastErrorText(GetLastError());
             LogLine("tx " + tx + ": " + Narrow(message));
             if (!aside.empty() && !MoveFileExW(aside.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING))
                 LogLine("tx " + tx + ": UNDO FAILED, running exe stays at " + Narrow(aside) + ": " + Narrow(LastErrorText(GetLastError())));
@@ -419,7 +420,8 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
 
     std::wstring bad;
     if (!VerifyTargets(cfg, ops, bad)) {
-        message = L"Kontrola po nahrazení selhala u " + bad + L"; vracím původní soubory.";
+        message = Tr(L"Kontrola po nahrazení selhala u ", L"Verification after the replacement failed for ") + bad +
+                  Tr(L"; vracím původní soubory.", L"; restoring the previous files.");
         LogLine("tx " + tx + ": " + Narrow(message));
         message += UndoDirect(cfg, ops, ops.size(), tx);
         return InstallOutcome::Failed;
@@ -473,12 +475,12 @@ InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::v
     if (r == InstallOutcome::Installed) {
         txj["state"] = "done";
         state["installed"] = releaseAfter;
-        if (message.empty()) message = std::to_wstring(ops.size()) + L" souborů nahrazeno.";
+        if (message.empty()) message = Tr(L"Nahrazeno souborů: ", L"Files replaced: ") + std::to_wstring(ops.size()) + L".";
         FinishHistory(hist, "installed", message);
     } else if (r == InstallOutcome::PendingRestart) {
         txj["state"] = "pending";
         state["pending"] = tx;
-        message = std::to_wstring(ops.size()) + L" souborů se nahradí při restartu.";
+        message = Tr(L"Při restartu se nahradí souborů: ", L"Files to replace at the restart: ") + std::to_wstring(ops.size()) + L".";
         hist["result"] = "pending-restart";
         hist["message"] = Narrow(message);
         AddHistory(hist);
@@ -497,7 +499,7 @@ InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::v
 InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::string& kind, std::wstring& message,
                         const Progress& progress) {
     json src = LoadJson(JoinPath(TxDir(of), L"tx.json"), json::object());
-    if (!src.contains("ops")) { message = L"Záloha aktualizace " + Widen(of) + L" už neexistuje."; return InstallOutcome::Failed; }
+    if (!src.contains("ops")) { message = Tr(L"Záloha aktualizace ", L"The backup of update ") + Widen(of) + Tr(L" už neexistuje.", L" no longer exists."); return InstallOutcome::Failed; }
     std::vector<Op> old = OpsFromJson(src["ops"]);
     std::string tx = NewTxId(kind);
     std::wstring dir = TxDir(tx);
@@ -526,14 +528,14 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
             o.staged = JoinPath(dir, L"new\\" + std::to_wstring(i) + L".bin");
             if (!EnsureDirs(o.staged, true) || !CopyFileW(old[i].backup.c_str(), o.staged.c_str(), FALSE) ||
                 Sha256File(o.staged) != o.newSha) {
-                message = L"Záloha souboru " + Widen(o.path) + L" je poškozená nebo chybí.";
+                message = Tr(L"Záloha souboru ", L"The backup of ") + Widen(o.path) + Tr(L" je poškozená nebo chybí.", L" is damaged or missing.");
                 return InstallOutcome::Failed;
             }
         }
         if (exists) {
             o.backup = JoinPath(dir, L"backup\\" + std::to_wstring(i) + L".bin");
             if (!EnsureDirs(o.backup, true) || !CopyFileW(target.c_str(), o.backup.c_str(), FALSE)) {
-                message = L"Nelze zálohovat " + Widen(o.path) + L": " + LastErrorText(GetLastError());
+                message = Tr(L"Nelze zálohovat ", L"Cannot back up ") + Widen(o.path) + L": " + LastErrorText(GetLastError());
                 return InstallOutcome::Failed;
             }
         }
@@ -559,6 +561,18 @@ std::wstring DataDir() {
     wchar_t path[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, path))) return JoinPath(path, L"LiberNTUpdate");
     return L"C:\\ProgramData\\LiberNTUpdate";
+}
+
+bool UiCzech() {
+    static int lang = -1;  // decided once per process: config.json, then the Windows UI language
+    if (lang < 0) {
+        json cfg = LoadJson(JoinPath(DataDir(), L"config.json"), json::object());
+        std::string want = cfg.contains("language") && cfg["language"].is_string() ? cfg["language"].get<std::string>() : "";
+        if (want == "cs") lang = 1;
+        else if (want == "en") lang = 0;
+        else lang = PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_CZECH ? 1 : 0;
+    }
+    return lang == 1;
 }
 
 Config LoadConfig() {
@@ -607,14 +621,15 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
     out.installed = InstalledRelease();
     out.pendingTx = PendingTransaction();
     if (cfg.feedUrl.empty()) {
-        error = L"Není nastavená adresa aktualizací: doplň \"feedUrl\" do " + JoinPath(DataDir(), L"config.json") + L".";
+        error = Tr(L"Není nastavená adresa aktualizací: doplň \"feedUrl\" do ", L"No update address is set: add \"feedUrl\" to ") +
+                JoinPath(DataDir(), L"config.json") + L".";
         return false;
     }
-    if (progress) progress(2, L"Stahuji seznam vydání…");
+    if (progress) progress(2, Tr(L"Stahuji seznam vydání…", L"Downloading the release list…"));
     std::vector<uint8_t> feedRaw, sigRaw, manRaw;
     if (!Fetch(cfg, "feed.json", feedRaw, error) || !Fetch(cfg, "feed.json.sig", sigRaw, error)) return false;
     if (!VerifySignature(feedRaw, std::string(sigRaw.begin(), sigRaw.end()))) {
-        error = L"Podpis seznamu vydání nesouhlasí. Aktualizace se odmítá.";
+        error = Tr(L"Podpis seznamu vydání nesouhlasí. Aktualizace se odmítá.", L"The signature of the release list does not match. The update is refused.");
         LogLine("feed signature mismatch");
         return false;
     }
@@ -622,10 +637,10 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
     try {
         feed = json::parse(feedRaw.begin(), feedRaw.end());
     } catch (...) {
-        error = L"Seznam vydání není platný JSON.";
+        error = Tr(L"Seznam vydání není platný JSON.", L"The release list is not valid JSON.");
         return false;
     }
-    if (!feed.contains("releases") || feed["releases"].empty()) { error = L"Feed neobsahuje žádné vydání."; return false; }
+    if (!feed.contains("releases") || feed["releases"].empty()) { error = Tr(L"Feed neobsahuje žádné vydání.", L"The feed has no release."); return false; }
     const json& rel = feed["releases"].back();
     out.latest.id = rel.value("id", "");
     out.latest.commit = rel.value("commit", "");
@@ -636,13 +651,13 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
         std::vector<uint8_t> raw;
         if (!Fetch(cfg, r.value("manifest", ""), raw, error)) return false;
         if (Sha256Hex(raw.data(), raw.size()) != r.value("manifestSha256", "")) {
-            error = L"Manifest " + Widen(r.value("id", "")) + L" nesouhlasí s podepsaným seznamem vydání.";
+            error = L"Manifest " + Widen(r.value("id", "")) + Tr(L" nesouhlasí s podepsaným seznamem vydání.", L" does not match the signed release list.");
             return false;
         }
         m = json::parse(raw.begin(), raw.end());
         return true;
     };
-    if (progress) progress(5, L"Stahuji manifest " + Widen(out.latest.id) + L"…");
+    if (progress) progress(5, Tr(L"Stahuji manifest ", L"Downloading manifest ") + Widen(out.latest.id) + L"…");
     json manifest;
     if (!loadManifest(rel, manifest)) return false;
     const json& files = manifest["files"];
@@ -678,7 +693,7 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
         std::transform(key.begin(), key.end(), key.begin(), ::tolower);
         newSha[key] = f.value("sha256", "");
         std::wstring target = TargetPath(cfg, path);
-        if (progress && (i % 25 == 0)) progress((int)(10 + 85 * i / std::max<size_t>(files.size(), 1)), L"Porovnávám " + Widen(path));
+        if (progress && (i % 25 == 0)) progress((int)(10 + 85 * i / std::max<size_t>(files.size(), 1)), Tr(L"Porovnávám ", L"Comparing ") + Widen(path));
         i++;
         std::string sha;
         WIN32_FILE_ATTRIBUTE_DATA a;
@@ -726,13 +741,13 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
                 if (g.value("sha256", "") == want) { size = g.value("size", (uint64_t)0); break; }
         out.changes.push_back({path, want, size, have});
     }
-    if (progress) progress(100, std::to_wstring(out.changes.size()) + L" změněných souborů.");
+    if (progress) progress(100, Tr(L"Změněných souborů: ", L"Changed files: ") + std::to_wstring(out.changes.size()) + L".");
     return true;
 }
 
 InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::wstring& message, const Progress& progress) {
-    if (!PendingTransaction().empty()) { message = L"Předchozí aktualizace čeká na restart."; return InstallOutcome::Failed; }
-    if (check.changes.empty()) { message = L"Systém už odpovídá vydání " + Widen(check.latest.id) + L"."; return InstallOutcome::NothingToDo; }
+    if (!PendingTransaction().empty()) { message = Tr(L"Předchozí aktualizace čeká na restart.", L"The previous update waits for a restart."); return InstallOutcome::Failed; }
+    if (check.changes.empty()) { message = Tr(L"Systém už odpovídá vydání ", L"The system already matches release ") + Widen(check.latest.id) + L"."; return InstallOutcome::NothingToDo; }
     std::string tx = NewTxId("install");
     std::wstring dir = TxDir(tx);
     EnsureDirs(dir, false);
@@ -747,12 +762,13 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
         std::vector<uint8_t> data;
         std::wstring err;
         if (!Fetch(cfg, "objects/" + c.newSha.substr(0, 2) + "/" + c.newSha, data, err) || Sha256Hex(data.data(), data.size()) != c.newSha) {
-            message = L"Stažení " + Widen(c.path) + L" selhalo: " + (err.empty() ? L"obsah nesouhlasí s manifestem" : err);
+            message = Tr(L"Stažení ", L"Download of ") + Widen(c.path) + Tr(L" selhalo: ", L" failed: ") +
+                      (err.empty() ? std::wstring(Tr(L"obsah nesouhlasí s manifestem", L"the contents do not match the manifest")) : err);
             FinishHistory(hist, "failed", message);
             return InstallOutcome::Failed;
         }
         if (!WriteFileAtomic(o.staged, data.data(), data.size())) {
-            message = L"Nelze uložit " + o.staged + L": " + LastErrorText(GetLastError());
+            message = Tr(L"Nelze uložit ", L"Cannot save ") + o.staged + L": " + LastErrorText(GetLastError());
             FinishHistory(hist, "failed", message);
             return InstallOutcome::Failed;
         }
@@ -762,7 +778,7 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
         if (FileExists(target)) {
             o.backup = JoinPath(dir, L"backup\\" + std::to_wstring(i) + L".bin");
             if (!EnsureDirs(o.backup, true) || !CopyFileW(target.c_str(), o.backup.c_str(), FALSE)) {
-                message = L"Nelze zálohovat " + Widen(c.path) + L": " + LastErrorText(GetLastError());
+                message = Tr(L"Nelze zálohovat ", L"Cannot back up ") + Widen(c.path) + L": " + LastErrorText(GetLastError());
                 FinishHistory(hist, "failed", message);
                 return InstallOutcome::Failed;
             }
@@ -806,29 +822,31 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
     std::string before = txj.value("installedBefore", state.value("installed", ""));
     if (FileExists(BootFile(L"plan.txt"))) {
         ClearBootFiles();
-        finish("failed", "failed", L"Program luupboot při startu neběžel, aktualizace " + Widen(tx) + L" se neprovedla.", before);
+        finish("failed", "failed", Tr(L"Program luupboot při startu neběžel, aktualizace ", L"luupboot did not run at boot; update ") + Widen(tx) + Tr(L" se neprovedla.", L" was not applied."), before);
         return true;
     }
     if (ReadFileBytes(BootFile(L"rolledback"), raw)) {
         bool cancelled = std::string(raw.begin(), raw.end()).rfind("cancelled", 0) == 0;
         ClearBootFiles();
         if (cancelled)
-            finish("cancelled", "cancelled", L"Při startu byla zvolena položka pro návrat, aktualizace " + Widen(tx) + L" se neprovedla.", before);
+            finish("cancelled", "cancelled", Tr(L"Při startu byla zvolena položka pro návrat, aktualizace ", L"The undo entry was chosen at boot; update ") + Widen(tx) + Tr(L" se neprovedla.", L" was not applied."), before);
         else
-            finish("rolled-back", "failed", L"Systém se po aktualizaci " + Widen(tx) + L" nespustil, při startu jsou vrácené původní soubory.", before);
+            finish("rolled-back", "failed", Tr(L"Systém se po aktualizaci ", L"The system did not start after update ") + Widen(tx) +
+                   Tr(L" nespustil, při startu jsou vrácené původní soubory.", L"; the previous files were restored at boot."), before);
         return true;
     }
 
     std::wstring bad;
     if (!ops.empty() && VerifyTargets(cfg, ops, bad)) {
         ClearBootFiles();
-        finish("done", "installed", L"Aktualizace " + Widen(tx) + L" dokončena po restartu (" + std::to_wstring(ops.size()) + L" souborů).",
+        finish("done", "installed", Tr(L"Aktualizace ", L"Update ") + Widen(tx) + Tr(L" dokončena po restartu (souborů: ", L" finished after the restart (files: ") +
+                   std::to_wstring(ops.size()) + L").",
                txj.value("release", ""));
         PruneTransactions(5);
         return true;
     }
     ClearBootFiles();
-    finish("failed", "failed", L"Po restartu nesouhlasí " + bad + L"; vracím původní soubory.", before);
+    finish("failed", "failed", Tr(L"Po restartu nesouhlasí ", L"After the restart this does not match: ") + bad + Tr(L"; vracím původní soubory.", L"; restoring the previous files."), before);
     std::wstring rb;
     InstallOutcome r = RevertTx(cfg, tx, "auto-rollback", rb, nullptr);
     message += L" " + rb;
@@ -838,7 +856,7 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
 
 bool CancelPending(std::wstring& message) {
     std::string tx = PendingTransaction();
-    if (tx.empty()) { message = L"Žádná aktualizace nečeká na restart."; return false; }
+    if (tx.empty()) { message = Tr(L"Žádná aktualizace nečeká na restart.", L"No update waits for a restart."); return false; }
     json txj = LoadJson(JoinPath(TxDir(tx), L"tx.json"), json::object());
     Config cfg = LoadConfig();
     ClearBootFiles();
@@ -849,20 +867,20 @@ bool CancelPending(std::wstring& message) {
     txj["state"] = "cancelled";
     SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
     json hist = HistoryFor(tx);
-    message = L"Čekající aktualizace " + Widen(tx) + L" je zrušená; systém zůstává beze změny.";
+    message = Tr(L"Čekající aktualizace ", L"Pending update ") + Widen(tx) + Tr(L" je zrušená; systém zůstává beze změny.", L" is cancelled; the system stays as it is.");
     if (!hist.empty()) FinishHistory(hist, "cancelled", message);
     return true;
 }
 
 InstallOutcome RollbackLast(const Config& cfg, std::wstring& message, const Progress& progress) {
-    if (!PendingTransaction().empty()) { message = L"Nejdřív je potřeba restartovat kvůli čekající aktualizaci."; return InstallOutcome::Failed; }
+    if (!PendingTransaction().empty()) { message = Tr(L"Nejdřív je potřeba restartovat kvůli čekající aktualizaci.", L"Restart first: an update is waiting for it."); return InstallOutcome::Failed; }
     auto history = LoadJson(JoinPath(DataDir(), L"history.json"), json::array());
     for (size_t i = history.size(); i-- > 0;) {
         const json& e = history[i];
         if (e.value("kind", "") == "install" && e.value("result", "") == "installed" && !e.contains("rolledBackBy"))
             return RevertTx(cfg, e.value("tx", ""), "rollback", message, progress);
     }
-    message = L"V historii není žádná aktualizace, kterou by šlo vrátit.";
+    message = Tr(L"V historii není žádná aktualizace, kterou by šlo vrátit.", L"The history has no update that could be undone.");
     return InstallOutcome::NothingToDo;
 }
 
@@ -871,7 +889,7 @@ bool EnsureFinalizeService(std::wstring& error) {
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
     std::wstring bin = L"\"" + std::wstring(exe) + L"\" /service";
     SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CREATE_SERVICE | SC_MANAGER_CONNECT);
-    if (!scm) { error = L"Správce služeb: " + LastErrorText(GetLastError()); return false; }
+    if (!scm) { error = Tr(L"Správce služeb: ", L"Service manager: ") + LastErrorText(GetLastError()); return false; }
     SC_HANDLE svc = CreateServiceW(scm, kServiceName, L"LiberNT Update", SERVICE_CHANGE_CONFIG, SERVICE_WIN32_OWN_PROCESS,
                                    SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, bin.c_str(), nullptr, nullptr, nullptr, nullptr, nullptr);
     if (!svc && GetLastError() == ERROR_SERVICE_EXISTS) {
@@ -881,9 +899,10 @@ bool EnsureFinalizeService(std::wstring& error) {
                                  nullptr, nullptr, nullptr);
     }
     bool ok = svc != nullptr;
-    if (!ok) error = L"Služba LiberNTUpdate: " + LastErrorText(GetLastError());
+    if (!ok) error = Tr(L"Služba LiberNTUpdate: ", L"Service LiberNTUpdate: ") + LastErrorText(GetLastError());
     if (svc) {
-        SERVICE_DESCRIPTIONW d{const_cast<LPWSTR>(L"Dokončí a ověří aktualizace LiberNT po restartu, při chybě je vrátí.")};
+        SERVICE_DESCRIPTIONW d{const_cast<LPWSTR>(Tr(L"Hledá a instaluje aktualizace LiberNT, po restartu je ověří a při chybě vrátí.",
+                                                     L"Finds and installs LiberNT updates, verifies them after the restart and undoes them on failure."))};
         ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &d);
         CloseServiceHandle(svc);
     }
@@ -953,20 +972,21 @@ bool RestartService(std::wstring& error) {
     SC_HANDLE svc = scm ? OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP) : nullptr;
     bool ok = false;
     if (!svc) {
-        error = L"Službu LiberNTUpdate nelze otevřít: " + LastErrorText(GetLastError());
+        error = Tr(L"Službu LiberNTUpdate nelze otevřít: ", L"Cannot open service LiberNTUpdate: ") + LastErrorText(GetLastError());
     } else {
         SERVICE_STATUS s{};
         if (QueryServiceStatus(svc, &s) && s.dwCurrentState == SERVICE_RUNNING) ControlService(svc, SERVICE_CONTROL_STOP, &s);
         for (int i = 0; i < 120 && QueryServiceStatus(svc, &s) && s.dwCurrentState != SERVICE_STOPPED; i++) Sleep(500);
         if (!StartServiceW(svc, 0, nullptr)) {
-            error = L"Službu LiberNTUpdate nelze spustit: " + LastErrorText(GetLastError());
+            error = Tr(L"Službu LiberNTUpdate nelze spustit: ", L"Cannot start service LiberNTUpdate: ") + LastErrorText(GetLastError());
         } else {
             ok = true;
             for (int i = 0; ok && i < 30; i++) {
                 Sleep(1000);
                 ok = QueryServiceStatus(svc, &s) && (s.dwCurrentState == SERVICE_RUNNING || s.dwCurrentState == SERVICE_START_PENDING);
             }
-            if (!ok) error = L"Služba LiberNTUpdate po spuštění skončila (stav " + std::to_wstring(s.dwCurrentState) + L", kód " +
+            if (!ok) error = Tr(L"Služba LiberNTUpdate po spuštění skončila (stav ", L"Service LiberNTUpdate stopped after the start (state ") +
+                             std::to_wstring(s.dwCurrentState) + Tr(L", kód ", L", code ") +
                              std::to_wstring(s.dwWin32ExitCode) + L").";
         }
     }
@@ -1066,12 +1086,12 @@ bool RegisterAutomatic(std::wstring& error) {
     HKEY key;
     if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key,
                         nullptr) != ERROR_SUCCESS) {
-        error = L"Nelze otevřít klíč Run v registru.";
+        error = Tr(L"Nelze otevřít klíč Run v registru.", L"Cannot open the Run key in the registry.");
         return false;
     }
     bool ok = RegSetValueExW(key, L"LiberNTUpdate", 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
     RegCloseKey(key);
-    if (!ok) error = L"Nelze zapsat spuštění ikony do klíče Run.";
+    if (!ok) error = Tr(L"Nelze zapsat spuštění ikony do klíče Run.", L"Cannot add the tray icon to the Run key.");
     return ok;
 }
 
@@ -1148,7 +1168,7 @@ bool SelfTest(std::wstring& report) {
     check(r == InstallOutcome::Installed, L"second install: " + msg);
     put(JoinPath(root, L"Windows\\system32\\old.dll"), "old");
     r = RollbackLast(cfg, msg, nullptr);
-    check(r == InstallOutcome::Installed && msg == L"1 souborů nahrazeno." &&
+    check(r == InstallOutcome::Installed && msg == std::wstring(Tr(L"Nahrazeno souborů: ", L"Files replaced: ")) + L"1." &&
               !FileExists(JoinPath(root, L"Windows\\system32\\added.dll")),
           L"partial update: rollback touches only the changed file: " + msg);
 

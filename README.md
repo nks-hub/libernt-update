@@ -13,7 +13,7 @@ Updates an installed [LiberNT](https://github.com/nks-hub/LiberNT) system to a n
 
 [Architecture](docs/ARCHITECTURE.md) · [Operations](docs/OPERATIONS.md) · [Screenshots of an update from upstream](docs/SCREENSHOTS.md)
 
-`server/luup.py` runs on the build machine: it reads `LiberNT.img` (`ninja liberntimg`), hashes the serviced files and publishes a signed release. `client/` builds `LiberNTUpdate.exe` (Win32, C++17, static CRT), which runs inside LiberNT, and `luupboot.exe`, a native program that replaces files at boot. The client's user interface is in Czech.
+`server/luup.py` runs on the build machine: it reads `LiberNT.img` (`ninja liberntimg`), hashes the serviced files and publishes a signed release. `client/` builds `LiberNTUpdate.exe` (Win32, C++17, static CRT), which runs inside LiberNT, and `luupboot.exe`, a native program that replaces files at boot. The client speaks Czech on a Czech system and English elsewhere.
 
 ## Features
 
@@ -73,6 +73,7 @@ start "" /wait "C:\Program Files\LiberNT Update\LiberNTUpdate.exe" /register
 | `auto` | `install` checks and installs, `notify` only checks (the tray icon announces it), `off` |
 | `checkMinutes` | interval of the automatic check |
 | `restartHour` | local hour of the automatic restart for a pending update, `-1` never |
+| `language` | `cs` or `en`; without it the window, tray and messages follow the Windows UI language (Czech, otherwise English) |
 
 ## Usage
 

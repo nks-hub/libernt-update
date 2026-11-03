@@ -7,6 +7,12 @@
 /// %ProgramData%\LiberNTUpdate: config, state, history, transactions and the log.
 std::wstring DataDir();
 
+/// User interface language: Czech when the Windows UI language is Czech, English otherwise; "language" in
+/// config.json ("cs" or "en") overrides it.
+bool UiCzech();
+/// The Czech or the English text, by UiCzech().
+inline const wchar_t* Tr(const wchar_t* cs, const wchar_t* en) { return UiCzech() ? cs : en; }
+
 struct Config {
     std::wstring feedUrl;  ///< ends with '/'
     std::wstring root;     ///< system drive the manifest paths are relative to, e.g. C:\ .

@@ -55,17 +55,17 @@ std::wstring Size(uint64_t b) {
 }
 
 std::wstring ResultText(const std::string& r) {
-    if (r.rfind("installed", 0) == 0) return L"nainstalováno" + Widen(r.substr(9));
-    if (r == "pending-restart") return L"čeká na restart";
-    if (r == "failed") return L"selhalo";
-    if (r == "running") return L"přerušeno";
+    if (r.rfind("installed", 0) == 0) return Tr(L"nainstalováno", L"installed") + Widen(r.substr(9));
+    if (r == "pending-restart") return Tr(L"čeká na restart", L"waits for a restart");
+    if (r == "failed") return Tr(L"selhalo", L"failed");
+    if (r == "running") return Tr(L"přerušeno", L"interrupted");
     return Widen(r);
 }
 
 std::wstring KindText(const std::string& k) {
-    if (k == "install") return L"aktualizace";
-    if (k == "rollback") return L"vrácení";
-    if (k == "auto-rollback") return L"automatické vrácení";
+    if (k == "install") return Tr(L"aktualizace", L"update");
+    if (k == "rollback") return Tr(L"vrácení", L"undo");
+    if (k == "auto-rollback") return Tr(L"automatické vrácení", L"automatic undo");
     return Widen(k);
 }
 
@@ -85,13 +85,15 @@ void RefreshHistory() {
 
 void RefreshInfo() {
     std::string inst = InstalledRelease(), pend = PendingTransaction();
-    std::wstring t = L"Nainstalované vydání: " + (inst.empty() ? std::wstring(L"zatím neevidováno") : Widen(inst));
+    std::wstring t = Tr(L"Nainstalované vydání: ", L"Installed release: ") +
+                      (inst.empty() ? std::wstring(Tr(L"zatím neevidováno", L"not recorded yet")) : Widen(inst));
     if (g_haveCheck) {
-        t += L"\r\nNejnovější vydání: " + Widen(g_check.latest.id) + L" (commit " + Widen(g_check.latest.commit.substr(0, 10)) + L", " +
+        t += Tr(L"\r\nNejnovější vydání: ", L"\r\nNewest release: ") + Widen(g_check.latest.id) + L" (commit " + Widen(g_check.latest.commit.substr(0, 10)) + L", " +
              Widen(g_check.latest.date) + L")";
-        t += g_check.changes.empty() ? L"\r\nSystém je aktuální." : L"\r\nK aktualizaci: " + std::to_wstring(g_check.changes.size()) + L" souborů";
+        t += g_check.changes.empty() ? std::wstring(Tr(L"\r\nSystém je aktuální.", L"\r\nThe system is up to date."))
+                                      : Tr(L"\r\nSouborů k aktualizaci: ", L"\r\nFiles to update: ") + std::to_wstring(g_check.changes.size());
     }
-    if (!pend.empty()) t += L"\r\nAktualizace " + Widen(pend) + L" čeká na restart.";
+    if (!pend.empty()) t += Tr(L"\r\nAktualizace ", L"\r\nUpdate ") + Widen(pend) + Tr(L" čeká na restart.", L" waits for a restart.");
     SetWindowTextW(g_info, t.c_str());
     EnableWindow(g_btn[0], !g_busy);
     EnableWindow(g_btn[1], !g_busy && g_haveCheck && !g_check.changes.empty() && pend.empty());
@@ -114,7 +116,7 @@ void ShowCheck() {
     for (auto& c : g_check.changes) {
         SetCell(g_changes, row, 0, Widen(c.path));
         SetCell(g_changes, row, 1, Size(c.size));
-        SetCell(g_changes, row, 2, c.oldSha.empty() ? L"nový" : L"změněný");
+        SetCell(g_changes, row, 2, c.oldSha.empty() ? Tr(L"nový", L"new") : Tr(L"změněný", L"changed"));
         row++;
     }
     std::wstring notes;
@@ -180,32 +182,33 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             g_wnd = w;
             g_info = Make(L"STATIC", L"", SS_LEFT, 0);
             SendMessageW(g_info, WM_SETFONT, (WPARAM)g_bold, TRUE);
-            const wchar_t* labels[4] = {L"&Zkontrolovat", L"&Nainstalovat", L"&Vrátit poslední", L"&Restartovat"};
+            const wchar_t* labels[4] = {Tr(L"&Zkontrolovat", L"&Check"), Tr(L"&Nainstalovat", L"&Install"), Tr(L"&Vrátit poslední", L"&Undo last"),
+                                        Tr(L"&Restartovat", L"&Restart")};
             for (int i = 0; i < 4; i++) g_btn[i] = Make(L"BUTTON", labels[i], BS_PUSHBUTTON | WS_TABSTOP, IdCheck + i);
             g_progress = Make(PROGRESS_CLASSW, L"", 0, 0);
             SendMessageW(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
-            g_status = Make(L"STATIC", L"Připraveno.", SS_LEFT | SS_ENDELLIPSIS, 0);
-            g_lblChanges = Make(L"STATIC", L"Soubory, které aktualizace změní", SS_LEFT, 0);
+            g_status = Make(L"STATIC", Tr(L"Připraveno.", L"Ready."), SS_LEFT | SS_ENDELLIPSIS, 0);
+            g_lblChanges = Make(L"STATIC", Tr(L"Soubory, které aktualizace změní", L"Files the update changes"), SS_LEFT, 0);
             g_changes = Make(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER, IdChanges);
             ListView_SetExtendedListViewStyle(g_changes, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-            AddColumn(g_changes, 0, L"Soubor", 480);
-            AddColumn(g_changes, 1, L"Velikost", 90);
-            AddColumn(g_changes, 2, L"Typ", 90);
-            g_lblHistory = Make(L"STATIC", L"Historie aktualizací", SS_LEFT, 0);
+            AddColumn(g_changes, 0, Tr(L"Soubor", L"File"), 480);
+            AddColumn(g_changes, 1, Tr(L"Velikost", L"Size"), 90);
+            AddColumn(g_changes, 2, Tr(L"Typ", L"Kind"), 90);
+            g_lblHistory = Make(L"STATIC", Tr(L"Historie aktualizací", L"Update history"), SS_LEFT, 0);
             g_history = Make(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER, IdHistory);
             ListView_SetExtendedListViewStyle(g_history, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
-            AddColumn(g_history, 0, L"Začátek (UTC)", 140);
-            AddColumn(g_history, 1, L"Akce", 120);
-            AddColumn(g_history, 2, L"Vydání", 190);
-            AddColumn(g_history, 3, L"Výsledek", 120);
-            AddColumn(g_history, 4, L"Souborů", 60);
-            AddColumn(g_history, 5, L"Zpráva", 400);
-            g_lblNotes = Make(L"STATIC", L"Poznámky k vydání (změny ve zdrojích)", SS_LEFT, 0);
+            AddColumn(g_history, 0, Tr(L"Začátek (UTC)", L"Started (UTC)"), 140);
+            AddColumn(g_history, 1, Tr(L"Akce", L"Action"), 120);
+            AddColumn(g_history, 2, Tr(L"Vydání", L"Release"), 190);
+            AddColumn(g_history, 3, Tr(L"Výsledek", L"Result"), 120);
+            AddColumn(g_history, 4, Tr(L"Souborů", L"Files"), 60);
+            AddColumn(g_history, 5, Tr(L"Zpráva", L"Message"), 400);
+            g_lblNotes = Make(L"STATIC", Tr(L"Poznámky k vydání (změny ve zdrojích)", L"Release notes (source changes)"), SS_LEFT, 0);
             g_notes = Make(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, IdNotes);
             RefreshHistory();
             RefreshInfo();
             std::string pend = PendingTransaction();
-            if (!pend.empty()) SetWindowTextW(g_status, L"Aktualizace čeká na restart; po něm ji služba ověří.");
+            if (!pend.empty()) SetWindowTextW(g_status, Tr(L"Aktualizace čeká na restart; po něm ji služba ověří.", L"An update waits for a restart; the service verifies it afterwards."));
             Start(Job::Check);
             return 0;
         }
@@ -222,18 +225,20 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             switch (LOWORD(wp)) {
                 case IdCheck: Start(Job::Check); break;
                 case IdInstall:
-                    if (MessageBoxW(w, (L"Nainstalovat vydání " + Widen(g_check.latest.id) + L"?\r\n\r\nPůvodní soubory se zálohují; když se něco "
-                                         L"nepovede, vrátí se automaticky.").c_str(),
+                    if (MessageBoxW(w, (Tr(L"Nainstalovat vydání ", L"Install release ") + Widen(g_check.latest.id) +
+                                     Tr(L"?\r\n\r\nPůvodní soubory se zálohují; když se něco nepovede, vrátí se automaticky.",
+                                        L"?\r\n\r\nThe current files are backed up; if anything fails they come back automatically."))
+                                        .c_str(),
                                     L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES)
                         Start(Job::Install);
                     break;
                 case IdRollback:
-                    if (MessageBoxW(w, L"Vrátit poslední nainstalovanou aktualizaci?", L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES)
+                    if (MessageBoxW(w, Tr(L"Vrátit poslední nainstalovanou aktualizaci?", L"Undo the last installed update?"), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES)
                         Start(Job::Rollback);
                     break;
                 case IdRestart: {
                     std::wstring err;
-                    if (MessageBoxW(w, L"Restartovat počítač nyní?", L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES && !RestartSystem(err))
+                    if (MessageBoxW(w, Tr(L"Restartovat počítač nyní?", L"Restart the computer now?"), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES && !RestartSystem(err))
                         MessageBoxW(w, err.c_str(), L"LiberNT Update", MB_ICONERROR);
                     break;
                 }
@@ -252,14 +257,16 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 g_check = *d->check;
                 g_haveCheck = true;
                 ShowCheck();
-                SetWindowTextW(g_status, (g_check.changes.empty() ? L"Systém odpovídá nejnovějšímu vydání."
-                                                                  : std::to_wstring(g_check.changes.size()) + L" souborů k aktualizaci.").c_str());
+                SetWindowTextW(g_status, (g_check.changes.empty()
+                                              ? std::wstring(Tr(L"Systém odpovídá nejnovějšímu vydání.", L"The system matches the newest release."))
+                                              : Tr(L"Souborů k aktualizaci: ", L"Files to update: ") + std::to_wstring(g_check.changes.size()))
+                                             .c_str());
             } else {
                 SetWindowTextW(g_status, d->message.c_str());
             }
             if (!d->ok) MessageBoxW(w, d->message.c_str(), L"LiberNT Update", MB_ICONERROR);
             if (d->outcome == InstallOutcome::PendingRestart &&
-                MessageBoxW(w, (d->message + L"\r\n\r\nRestartovat nyní?").c_str(), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                MessageBoxW(w, (d->message + Tr(L"\r\n\r\nRestartovat nyní?", L"\r\n\r\nRestart now?")).c_str(), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES) {
                 std::wstring err;
                 if (!RestartSystem(err)) MessageBoxW(w, err.c_str(), L"LiberNT Update", MB_ICONERROR);
             }
@@ -339,14 +346,15 @@ void RefreshTray(HWND w) {
     Config cfg = LoadConfig();
     std::wstring tip, title, text;
     if (!pending.empty()) {
-        tip = L"LiberNT Update: aktualizace čeká na restart";
-        title = L"Aktualizace je připravená";
-        text = L"Dokončí se při příštím restartu";
-        text += cfg.restartHour >= 0 ? L" (automaticky v " + std::to_wstring(cfg.restartHour) + L":00)." : L".";
+        tip = Tr(L"LiberNT Update: aktualizace čeká na restart", L"LiberNT Update: an update waits for a restart");
+        title = Tr(L"Aktualizace je připravená", L"The update is ready");
+        text = Tr(L"Dokončí se při příštím restartu", L"It finishes at the next restart");
+        text += cfg.restartHour >= 0 ? Tr(L" (automaticky v ", L" (automatically at ") + std::to_wstring(cfg.restartHour) + L":00)." : std::wstring(L".");
     } else {
-        tip = L"LiberNT Update: k dispozici je " + Widen(s.latest);
-        title = L"Je k dispozici aktualizace LiberNT";
-        text = L"Vydání " + Widen(s.latest) + L" mění " + std::to_wstring(s.changes) + L" souborů. Klepnutím otevřete LiberNT Update.";
+        tip = Tr(L"LiberNT Update: k dispozici je ", L"LiberNT Update: available ") + Widen(s.latest);
+        title = Tr(L"Je k dispozici aktualizace LiberNT", L"A LiberNT update is available");
+        text = Tr(L"Vydání ", L"Release ") + Widen(s.latest) + Tr(L", souborů ke změně: ", L", files to change: ") + std::to_wstring(s.changes) +
+               Tr(L". Klepnutím otevřete LiberNT Update.", L". Click to open LiberNT Update.");
     }
     g_nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
     wcsncpy_s(g_nid.szTip, tip.c_str(), _TRUNCATE);
@@ -381,9 +389,9 @@ LRESULT CALLBACK TrayProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 OpenMainWindow();
             } else if (lp == WM_RBUTTONUP || lp == WM_CONTEXTMENU) {
                 HMENU m = CreatePopupMenu();
-                AppendMenuW(m, MF_STRING, IdOpen, L"Otevřít LiberNT Update");
-                if (!PendingTransaction().empty()) AppendMenuW(m, MF_STRING, IdRestartNow, L"Restartovat a dokončit aktualizaci");
-                AppendMenuW(m, MF_STRING, IdHide, L"Skrýt ikonu");
+                AppendMenuW(m, MF_STRING, IdOpen, Tr(L"Otevřít LiberNT Update", L"Open LiberNT Update"));
+                if (!PendingTransaction().empty()) AppendMenuW(m, MF_STRING, IdRestartNow, Tr(L"Restartovat a dokončit aktualizaci", L"Restart and finish the update"));
+                AppendMenuW(m, MF_STRING, IdHide, Tr(L"Skrýt ikonu", L"Hide the icon"));
                 POINT p;
                 GetCursorPos(&p);
                 SetForegroundWindow(w);
