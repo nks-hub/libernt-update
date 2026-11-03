@@ -608,7 +608,7 @@ std::vector<HistoryEntry> LoadHistory() {
         h.finished = e.value("finished", "");
         h.result = e.value("result", "");
         h.message = e.value("message", "");
-        if (e.contains("rolledBackBy")) h.result += " (vráceno)";
+        if (e.contains("rolledBackBy")) h.result += Narrow(Tr(L" (vráceno)", L" (undone)"));
         h.files = e.value("files", 0);
         out.push_back(h);
     }
