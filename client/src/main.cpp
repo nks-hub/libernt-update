@@ -56,6 +56,7 @@ void WINAPI ServiceMain(DWORD, LPWSTR*) {
     g_status = RegisterServiceCtrlHandlerExW(L"LiberNTUpdate", ServiceControl, nullptr);
     g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     ReportService(SERVICE_RUNNING);
+    SnapshotRunningClient();
     std::wstring msg;
     if (FinalizePending(LoadConfig(), msg)) LogLine("service: " + Narrow(msg));
     ServiceHousekeeping();

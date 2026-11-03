@@ -33,6 +33,10 @@ bool RegisterAutomatic(std::wstring& error);
 /// Client version, set at build time (LNTU_VERSION), "dev" for local builds.
 const char* ClientVersion();
 
+/// Service start, before anything else: copies the running exe to %ProgramData%\LiberNTUpdate\watchdog.exe, which
+/// supervises a later self-update with code known to work.
+void SnapshotRunningClient();
+
 /// Service start: removes the client files an earlier self-update moved aside and installs the current luupboot.exe.
 void ServiceHousekeeping();
 

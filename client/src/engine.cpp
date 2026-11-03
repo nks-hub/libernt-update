@@ -147,11 +147,10 @@ std::wstring OwnExe() {
     return exe;
 }
 
-/// The client's own folder: its running exe can be renamed aside and replaced without a restart.
-bool IsOwnFile(const std::wstring& path) {
-    std::wstring exe = OwnExe(), dir = exe.substr(0, exe.find_last_of(L'\\') + 1);
-    return path.size() > dir.size() && _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) == 0 &&
-           path.find(L'\\', dir.size()) == std::wstring::npos;
+/// The client's folder (manifest path): its running exes can be renamed aside and replaced without a restart.
+bool IsClientFile(const std::string& manifestPath) {
+    static const char prefix[] = "program files/libernt update/";
+    return manifestPath.size() > sizeof prefix - 1 && _strnicmp(manifestPath.c_str(), prefix, sizeof prefix - 1) == 0;
 }
 
 /// A file someone has open or mapped (a loaded DLL, the running kernel) cannot be replaced now.
@@ -263,19 +262,25 @@ struct Op {
     std::string path, newSha, oldSha;
     std::wstring staged;  ///< file inside the transaction to move into place; empty = delete the target
     std::wstring backup;  ///< copy of the previous file; empty = the file did not exist
+    std::wstring target;  ///< disk path fixed when the transaction was made; later stages never map path again
 };
+
+/// Disk path of an op. Transactions written before target was recorded fall back to mapping the manifest path.
+std::wstring Target(const Config& cfg, const Op& o) { return o.target.empty() ? TargetPath(cfg, o.path) : o.target; }
 
 json OpsToJson(const std::vector<Op>& ops) {
     json a = json::array();
     for (auto& o : ops)
-        a.push_back({{"path", o.path}, {"newSha", o.newSha}, {"oldSha", o.oldSha}, {"staged", Narrow(o.staged)}, {"backup", Narrow(o.backup)}});
+        a.push_back({{"path", o.path}, {"newSha", o.newSha}, {"oldSha", o.oldSha}, {"staged", Narrow(o.staged)}, {"backup", Narrow(o.backup)},
+                     {"target", Narrow(o.target)}});
     return a;
 }
 
 std::vector<Op> OpsFromJson(const json& a) {
     std::vector<Op> ops;
     for (auto& j : a)
-        ops.push_back({j.value("path", ""), j.value("newSha", ""), j.value("oldSha", ""), Widen(j.value("staged", "")), Widen(j.value("backup", ""))});
+        ops.push_back({j.value("path", ""), j.value("newSha", ""), j.value("oldSha", ""), Widen(j.value("staged", "")), Widen(j.value("backup", "")),
+                       Widen(j.value("target", ""))});
     return ops;
 }
 
@@ -285,7 +290,7 @@ std::wstring UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t ap
     size_t failed = 0;
     std::wstring first;
     for (size_t i = applied; i-- > 0;) {
-        std::wstring target = TargetPath(cfg, ops[i].path);
+        std::wstring target = Target(cfg, ops[i]);
         BOOL ok = !ops[i].backup.empty() ? CopyFileW(ops[i].backup.c_str(), target.c_str(), FALSE)
                                          : (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND);
         if (ok && (ops[i].backup.empty() || Sha256File(target) == ops[i].oldSha)) continue;
@@ -303,7 +308,7 @@ std::wstring UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t ap
 bool VerifyTargets(const Config& cfg, const std::vector<Op>& ops, std::wstring& bad) {
     size_t mismatches = 0;
     for (auto& o : ops) {
-        std::wstring target = TargetPath(cfg, o.path);
+        std::wstring target = Target(cfg, o);
         std::string have = FileExists(target) ? Sha256File(target) : "";
         if (have == o.newSha) continue;
         LogLine("verify: " + o.path + " has " + (have.empty() ? std::string("no file") : have.substr(0, 16)) + ", expected " +
@@ -338,11 +343,11 @@ void LogBootFailures() {
 bool WriteBootPlans(const Config& cfg, const std::vector<Op>& ops, std::wstring& error) {
     std::wstring plan = L"LUUP 1\n", undo = L"LUUP 1\n";
     for (auto& o : ops) {
-        std::wstring target = NtPath(TargetPath(cfg, o.path));
+        std::wstring target = NtPath(Target(cfg, o));
         plan += o.staged.empty() ? L"D\t" + target + L"\n" : L"M\t" + NtPath(o.staged) + L"\t" + target + L"\n";
     }
     for (size_t i = ops.size(); i-- > 0;) {
-        std::wstring target = NtPath(TargetPath(cfg, ops[i].path));
+        std::wstring target = NtPath(Target(cfg, ops[i]));
         undo += ops[i].backup.empty() ? L"D\t" + target + L"\n" : L"M\t" + NtPath(ops[i].backup) + L"\t" + target + L"\n";
     }
     ClearBootFiles();
@@ -361,15 +366,15 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
                        const Progress& progress) {
     bool restart = false;
     for (auto& o : ops) {
-        std::wstring t = TargetPath(cfg, o.path);
-        if (InUse(t) && !IsOwnFile(t)) { restart = true; break; }
+        std::wstring t = Target(cfg, o);
+        if (InUse(t) && !IsClientFile(o.path)) { restart = true; break; }
     }
     txj["mode"] = restart ? "restart" : "direct";
     SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
 
     for (size_t i = 0; i < ops.size(); i++) {
         auto& o = ops[i];
-        std::wstring target = TargetPath(cfg, o.path);
+        std::wstring target = Target(cfg, o);
         if (progress) progress((int)(70 + 25 * i / std::max<size_t>(ops.size(), 1)), L"Nahrazuji " + Widen(o.path));
         // luupboot cannot create folders, so they exist before the restart.
         if (!EnsureDirs(target, true)) {
@@ -381,7 +386,7 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
         if (restart) continue;
         // The running client: Windows lets a mapped exe be renamed, so it moves aside and the new one takes its name.
         std::wstring aside;
-        if (!o.staged.empty() && IsOwnFile(target) && InUse(target)) {
+        if (!o.staged.empty() && IsClientFile(o.path) && InUse(target)) {
             aside = target + L".old-" + Widen(tx);
             if (!MoveFileExW(target.c_str(), aside.c_str(), MOVEFILE_REPLACE_EXISTING)) {
                 message = L"Nelze odsunout běžící " + Widen(o.path) + L": " + LastErrorText(GetLastError());
@@ -503,10 +508,19 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
         o.path = old[i].path;
         o.oldSha = old[i].newSha;
         o.newSha = old[i].oldSha;
-        std::wstring target = TargetPath(cfg, o.path);
+        o.target = Target(cfg, old[i]);
+        std::wstring target = o.target;
         bool exists = FileExists(target);
+        std::string have = exists ? Sha256File(target) : "";
         // Files the update never reached are already as they were; touching them again only adds risk.
-        if (exists ? Sha256File(target) == o.newSha : o.newSha.empty()) continue;
+        if (have == o.newSha) continue;
+        // Only what the update itself wrote is undone: a file that is neither the update's nor the original
+        // (changed since, or another file mapped to the same name) is left alone instead of being deleted.
+        if (have != o.oldSha) {
+            LogLine("tx " + tx + ": " + o.path + " (" + Narrow(target) + ") is not the file the update wrote (" +
+                    (have.empty() ? std::string("missing") : have.substr(0, 16)) + "), left as it is");
+            continue;
+        }
         if (!old[i].backup.empty()) {
             // Restart-time moves consume their source, so restore from a copy and keep the original backup.
             o.staged = JoinPath(dir, L"new\\" + std::to_wstring(i) + L".bin");
@@ -744,6 +758,7 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
         }
         done += c.size;
         std::wstring target = TargetPath(cfg, c.path);
+        o.target = target;
         if (FileExists(target)) {
             o.backup = JoinPath(dir, L"backup\\" + std::to_wstring(i) + L".bin");
             if (!EnsureDirs(o.backup, true) || !CopyFileW(target.c_str(), o.backup.c_str(), FALSE)) {
@@ -891,6 +906,16 @@ Status LoadStatus() {
 #endif
 const char* ClientVersion() { return LNTU_VERSION; }
 
+std::wstring WatchdogExe() { return JoinPath(DataDir(), L"watchdog.exe"); }
+
+void SnapshotRunningClient() {
+    // Called first thing at service start, while the exe on disk is still the image this process runs.
+    std::wstring exe = WatchdogExe();
+    EnsureDirs(exe, true);
+    if (!CopyFileW(OwnExe().c_str(), exe.c_str(), FALSE))
+        LogLine("service: cannot copy the running client to " + Narrow(exe) + ": " + Narrow(LastErrorText(GetLastError())));
+}
+
 void ServiceHousekeeping() {
     std::wstring exe = OwnExe(), dir = exe.substr(0, exe.find_last_of(L'\\'));
     WIN32_FIND_DATAW fd;
@@ -948,14 +973,15 @@ bool WatchSelfUpdate(const std::string& tx) {
     return r == InstallOutcome::Installed;
 }
 
-/// After a self-update in the service: the previous exe (still on disk under the aside name) becomes the watchdog.
+/// After a self-update in the service: the copy of the code that is running now (made at service start, see
+/// SnapshotRunningClient) restarts the service with the new client and undoes the update if that fails.
 bool StartSelfUpdateWatchdog(const std::string& tx) {
-    std::wstring aside = OwnExe() + L".old-" + Widen(tx);
-    std::wstring cmd = L"\"" + aside + L"\" /watch-self-update " + Widen(tx);
+    std::wstring exe = WatchdogExe();
+    std::wstring cmd = L"\"" + exe + L"\" /watch-self-update " + Widen(tx);
     STARTUPINFOW si{sizeof si};
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(aside.c_str(), &cmd[0], nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
-        LogLine("self-update: cannot start the watchdog " + Narrow(aside) + ": " + Narrow(LastErrorText(GetLastError())));
+    if (!FileExists(exe) || !CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
+        LogLine("self-update: cannot start the watchdog " + Narrow(exe) + ": " + Narrow(LastErrorText(GetLastError())));
         return false;
     }
     CloseHandle(pi.hThread);
@@ -1097,6 +1123,15 @@ bool SelfTest(std::wstring& report) {
     check(r == InstallOutcome::Installed && msg == L"1 souborů nahrazeno." &&
               !FileExists(JoinPath(root, L"Windows\\system32\\added.dll")),
           L"partial update: rollback touches only the changed file: " + msg);
+
+    // A file someone else replaced after the update is neither ours nor the original: rollback leaves it alone.
+    r = InstallUpdate(cfg, c, msg, nullptr);
+    put(JoinPath(root, L"Windows\\system32\\added.dll"), "edited by the user");
+    r = RollbackLast(cfg, msg, nullptr);
+    check(ReadFileBytes(JoinPath(root, L"Windows\\system32\\added.dll"), b) && std::string(b.begin(), b.end()) == "edited by the user" &&
+              ReadFileBytes(JoinPath(root, L"Windows\\system32\\old.dll"), b) && std::string(b.begin(), b.end()) == "old",
+          L"rollback keeps a file changed after the update: " + msg);
+    DeleteFileW(JoinPath(root, L"Windows\\system32\\added.dll").c_str());
 
     // A file in use forces the restart path: luupboot's code applies the plan in-process here, as at boot.
     std::wstring keep = JoinPath(root, L"Windows\\system32\\keep.dll"), extra = JoinPath(root, L"Windows\\system32\\extra.dll");
