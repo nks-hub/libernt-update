@@ -1,0 +1,4 @@
+client/out/
+__pycache__/
+*.pyc
+*.key
