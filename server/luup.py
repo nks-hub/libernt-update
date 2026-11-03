@@ -81,10 +81,9 @@ def serviced(rel: str) -> bool:
 
 
 # Strings every build writes into its files: the build tag (20261103-nt10.0-044-1374-g320a592, also without the
-# date) and commit hashes.
+# date). Arbitrary 40-character hashes are deliberately not ignored: they can be certificates or other real data.
 BUILD_TAG = re.compile(rb"(?:20\d{6}-)?nt10\.0-\d{3}-\d{4}-g[0-9a-f]{7,12}")
 BUILD_TAG_UTF16 = re.compile(rb"(?:2\x000\x00(?:\d\x00){6}-\x00)?n\x00t\x001\x000\x00\.\x000\x00-\x00(?:\d\x00){3}-\x00(?:\d\x00){4}-\x00g\x00(?:[0-9a-f]\x00){7,12}")
-COMMIT_HASH = re.compile(rb"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
 
 
 def _pe_offset(b: bytes) -> int | None:
@@ -99,7 +98,7 @@ def _pe_offset(b: bytes) -> int | None:
 
 def build_neutral(b: bytes) -> bytes:
     """The bytes with what changes on every build blanked out: PE time stamps, checksum, debug directory contents
-    (CodeView GUID, PDB path), build tags and, in PE images, commit hashes. Two files with equal results run the same."""
+    (CodeView GUID, PDB path) and build tags. Two files with equal results run the same."""
     base = _pe_offset(b)
     d = bytearray(b)
     if base is not None:
@@ -125,8 +124,7 @@ def build_neutral(b: bytes) -> bytes:
                         d[base + ptr:base + ptr + size] = bytes(size)
                 break
     out = bytes(d)
-    patterns = (BUILD_TAG, BUILD_TAG_UTF16, COMMIT_HASH) if base is not None else (BUILD_TAG, BUILD_TAG_UTF16)
-    for rx in patterns:
+    for rx in (BUILD_TAG, BUILD_TAG_UTF16):
         out = rx.sub(lambda m: b"#" * len(m.group(0)), out)
     return out
 
@@ -273,6 +271,7 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
         old_map = {e["path"].lower(): e["sha256"] for e in old["files"]}
         new_paths = {f["path"].lower() for f in files}
         changed = sum(1 for f in files if old_map.get(f["path"].lower()) != f["sha256"])
+        changed += len(set(old_map) - new_paths)
         if not changed and new_paths == set(old_map):
             print(f"nothing to publish: commit {commit[:10]} builds the same files as {previous['id']}")
             return previous
@@ -288,6 +287,7 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
     manifest_raw = write_json(feed_dir / "releases" / release_id / "manifest.json", manifest)
 
     entry = {
+        "sequence": max([r.get("sequence", i + 1) for i, r in enumerate(feed["releases"])] or [0]) + 1,
         "id": release_id,
         "commit": commit,
         "client": client,
@@ -347,14 +347,14 @@ def self_test() -> int:
         (tree / "Users/readme.txt").write_bytes(b"user data")
         t0 = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
         e1 = publish_tree(tree, feed, key, "a" * 40, now=t0)
-        assert e1["files"] == 3 and e1["changedFromPrevious"] is None, e1
+        assert e1["files"] == 3 and e1["changedFromPrevious"] is None and e1["sequence"] == 1, e1
         m1 = json.loads((feed / e1["manifest"]).read_text("utf-8"))
         assert m1["aliases"] == [{"path": "Windows/system32/ntoskrnl.exe",
                                   "candidates": ["Windows/system32/ntoskrnl.exe", "Windows/system32/ntkrnlmp.exe"]}], m1["aliases"]
         (tree / "Windows/system32/ntoskrnl.exe").write_bytes(b"kernel-v2")
         (tree / "Windows/system32/new.dll").write_bytes(b"new")
         e2 = publish_tree(tree, feed, key, "b" * 40, now=t0 + dt.timedelta(hours=1))
-        assert e2["files"] == 4 and e2["changedFromPrevious"] == 2, e2
+        assert e2["files"] == 4 and e2["changedFromPrevious"] == 2 and e2["sequence"] == 2, e2
         e3 = publish_tree(tree, feed, key, "c" * 40, now=t0 + dt.timedelta(hours=2))
         assert e3 is e2 or e3["id"] == e2["id"], "a commit with identical files must not become a release"
         assert len(json.loads((feed / "feed.json").read_text("utf-8"))["releases"]) == 2
@@ -391,6 +391,9 @@ def self_test() -> int:
         sha7 = {f["path"]: f["sha256"] for f in json.loads((feed / e7["manifest"]).read_text("utf-8"))["files"]}
         assert e7["changedFromPrevious"] == 1 and sha7["Windows/system32/tool.exe"] != sha5["Windows/system32/tool.exe"], e7
         assert build_neutral(b"caroots: " + b"a" * 40) != build_neutral(b"caroots: " + b"b" * 40), "hashes in text files count"
+        (tree / "Windows/system32/new.dll").unlink()
+        e8 = publish_tree(tree, feed, key, "1" * 40, now=t0 + dt.timedelta(hours=7), client="v9.9.9")
+        assert e8["changedFromPrevious"] == 1 and e8["sequence"] == e7["sequence"] + 1, e8
         assert verify_feed(feed, pub) == 0
         (feed / "feed.json").write_bytes((feed / "feed.json").read_bytes().replace(b"LiberNT", b"Evil"))
         try:

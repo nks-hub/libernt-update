@@ -81,7 +81,8 @@ std::string Sha256File(const std::wstring& path) {
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (h == INVALID_HANDLE_VALUE) return {};
     Sha256 s;
-    std::vector<uint8_t> buf(1 << 20);
+    // A full check hashes thousands of files. Reuse one buffer per worker instead of allocating 1 MiB per file.
+    thread_local std::vector<uint8_t> buf(1 << 20);
     DWORD got = 0;
     bool ok = true;
     while ((ok = ReadFile(h, buf.data(), (DWORD)buf.size(), &got, nullptr) != 0) && got) s.update(buf.data(), got);

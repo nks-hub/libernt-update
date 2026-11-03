@@ -8,8 +8,8 @@
 #include <ctime>
 #include <map>
 
+#include "feed_internal.h"
 #include "http.h"
-#include "pubkey.h"
 #include "sha256.h"
 #include "util.h"
 
@@ -24,7 +24,6 @@ using json = nlohmann::json;
 namespace {
 
 std::wstring g_dataOverride;  // set by SelfTest to keep its state away from the real one
-std::string g_testPubKey;     // set by SelfTest only: its feed is signed with the RFC 8032 test key
 
 const wchar_t kServiceName[] = L"LiberNTUpdate";
 const wchar_t kSessionManager[] = L"SYSTEM\\CurrentControlSet\\Control\\Session Manager";
@@ -45,13 +44,6 @@ bool HexToBytes(const std::string& hex, std::vector<uint8_t>& out) {
 std::string Trim(const std::string& s) {
     size_t a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
     return a == std::string::npos ? std::string() : s.substr(a, b - a + 1);
-}
-
-bool VerifySignature(const std::vector<uint8_t>& msg, const std::string& sigHex) {
-    std::vector<uint8_t> sig, pub;
-    if (!HexToBytes(Trim(sigHex), sig) || sig.size() != 64) return false;
-    if (!HexToBytes(g_testPubKey.empty() ? kFeedPublicKeyHex : g_testPubKey, pub) || pub.size() != 32) return false;
-    return crypto_ed25519_check(sig.data(), pub.data(), msg.data(), msg.size()) == 0;
 }
 
 /// Fetches a file of the feed: over HTTP, or from a directory for file:/// feeds (self-test, offline media).
@@ -132,7 +124,7 @@ void AddHistory(const json& entry) {
     for (auto& e : h)
         if (e.value("tx", "") == entry.value("tx", "")) { e = entry; replaced = true; }
     if (!replaced) h.push_back(entry);
-    SaveJson(path, h);
+    if (!SaveJson(path, h)) LogLine("cannot save history.json: " + Narrow(LastErrorText(GetLastError())));
 }
 
 json HistoryFor(const std::string& tx) {
@@ -227,7 +219,7 @@ bool EnsureBootApplier(std::wstring& error) {
     std::wstring dst = JoinPath(sys, L"luupboot.exe");
     if (!FileExists(src)) { error = src + Tr(L" chybí.", L" is missing."); return false; }
     if (Sha256File(src) != Sha256File(dst) && !CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
-        error = L"Nelze nainstalovat " + dst + L": " + LastErrorText(GetLastError());
+        error = Tr(L"Nelze nainstalovat ", L"Cannot install ") + dst + L": " + LastErrorText(GetLastError());
         return false;
     }
     HKEY key;
@@ -235,11 +227,24 @@ bool EnsureBootApplier(std::wstring& error) {
         error = Tr(L"Nelze otevřít Session Manager v registru.", L"Cannot open Session Manager in the registry.");
         return false;
     }
-    std::vector<wchar_t> buf(4096, 0);
-    DWORD size = (DWORD)((buf.size() - 2) * sizeof(wchar_t)), type = 0;
+    DWORD size = 0, type = 0;
     std::vector<std::wstring> items;
-    if (RegQueryValueExW(key, L"BootExecute", nullptr, &type, (BYTE*)buf.data(), &size) == ERROR_SUCCESS && type == REG_MULTI_SZ)
+    LONG query = RegQueryValueExW(key, L"BootExecute", nullptr, &type, nullptr, &size);
+    if (query != ERROR_FILE_NOT_FOUND && (query != ERROR_SUCCESS || type != REG_MULTI_SZ)) {
+        error = Tr(L"Nelze bezpečně přečíst BootExecute.", L"BootExecute cannot be read safely.");
+        RegCloseKey(key);
+        return false;
+    }
+    std::vector<wchar_t> buf(size / sizeof(wchar_t) + 2, 0);
+    if (query == ERROR_SUCCESS) {
+        query = RegQueryValueExW(key, L"BootExecute", nullptr, &type, (BYTE*)buf.data(), &size);
+        if (query != ERROR_SUCCESS || type != REG_MULTI_SZ) {
+            error = Tr(L"Nelze bezpečně přečíst BootExecute.", L"BootExecute cannot be read safely.");
+            RegCloseKey(key);
+            return false;
+        }
         for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) items.emplace_back(p);
+    }
     std::wstring entry = L"luupboot " + NtPath(DataDir());
     std::vector<std::wstring> next;
     for (auto& s : items)
@@ -252,7 +257,7 @@ bool EnsureBootApplier(std::wstring& error) {
         blob.push_back(L'\0');
         ok = RegSetValueExW(key, L"BootExecute", 0, REG_MULTI_SZ, (const BYTE*)blob.data(), (DWORD)(blob.size() * sizeof(wchar_t))) == ERROR_SUCCESS;
         if (ok) RegFlushKey(key);
-        else error = L"Nelze zapsat BootExecute.";
+        else error = Tr(L"Nelze zapsat BootExecute.", L"Cannot write BootExecute.");
     }
     RegCloseKey(key);
     return ok;
@@ -349,7 +354,7 @@ bool WriteBootPlans(const Config& cfg, const std::vector<Op>& ops, std::wstring&
     }
     for (size_t i = ops.size(); i-- > 0;) {
         std::wstring target = NtPath(Target(cfg, ops[i]));
-        undo += ops[i].backup.empty() ? L"D\t" + target + L"\n" : L"M\t" + NtPath(ops[i].backup) + L"\t" + target + L"\n";
+        undo += ops[i].backup.empty() ? L"D\t" + target + L"\n" : L"C\t" + NtPath(ops[i].backup) + L"\t" + target + L"\n";
     }
     ClearBootFiles();
     // The plan goes last: its presence is what makes luupboot act.
@@ -371,12 +376,17 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
         if (InUse(t) && !IsClientFile(o.path)) { restart = true; break; }
     }
     txj["mode"] = restart ? "restart" : "direct";
-    SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
+    if (!SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj)) {
+        message = Tr(L"Nelze uložit stav připravené aktualizace.", L"The prepared update state cannot be saved.");
+        return InstallOutcome::Failed;
+    }
 
     for (size_t i = 0; i < ops.size(); i++) {
         auto& o = ops[i];
         std::wstring target = Target(cfg, o);
-        if (progress) progress((int)(70 + 25 * i / std::max<size_t>(ops.size(), 1)), L"Nahrazuji " + Widen(o.path));
+        if (progress)
+            progress((int)(70 + 25 * i / std::max<size_t>(ops.size(), 1)),
+                     (o.staged.empty() ? Tr(L"Odstraňuji ", L"Removing ") : Tr(L"Nahrazuji ", L"Replacing ")) + Widen(o.path));
         // luupboot cannot create folders, so they exist before the restart.
         if (!EnsureDirs(target, true)) {
             message = Tr(L"Nelze vytvořit složku pro ", L"Cannot create the folder for ") + Widen(o.path) + L": " + LastErrorText(GetLastError());
@@ -489,8 +499,25 @@ InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::v
         txj["state"] = "failed";
         FinishHistory(hist, "failed", message);
     }
-    SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
-    SaveState(state);
+    bool savedTx = SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
+    bool savedState = SaveState(state);
+    if ((!savedTx || !savedState) && (r == InstallOutcome::Installed || r == InstallOutcome::PendingRestart)) {
+        std::wstring persistence = Tr(L"Nelze bezpečně uložit stav aktualizace.", L"The update state cannot be saved safely.");
+        if (r == InstallOutcome::Installed) persistence += UndoDirect(cfg, ops, ops.size(), tx);
+        else {
+            ClearBootFiles();
+            RemoveRecoveryEntry(cfg);
+        }
+        state["installed"] = txj.value("installedBefore", "");
+        state["pending"] = "";
+        SaveState(state);
+        txj["state"] = "failed";
+        SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
+        message = persistence;
+        FinishHistory(hist, "failed", message);
+        if (progress) progress(0, message);
+        return InstallOutcome::Failed;
+    }
     if (progress) progress(100, message);
     return r;
 }
@@ -542,6 +569,11 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
         ops.push_back(o);
     }
     std::string releaseBefore = src.value("installedBefore", "");
+    if (ops.empty()) {
+        message = Tr(L"Žádný soubor už nelze bezpečně vrátit; systém zůstal beze změny.",
+                     L"No file can be safely undone now; the system was left unchanged.");
+        return InstallOutcome::NothingToDo;
+    }
     json txj{{"tx", tx}, {"kind", kind}, {"of", of}, {"release", releaseBefore}, {"installedBefore", LoadState().value("installed", "")},
              {"ops", OpsToJson(ops)}, {"state", "prepared"}};
     json hist = NewHistory(tx, kind, releaseBefore, ops.size());
@@ -616,161 +648,38 @@ std::vector<HistoryEntry> LoadHistory() {
     return out;
 }
 
-bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, const Progress& progress) {
-    out = CheckResult{};
-    out.installed = InstalledRelease();
-    out.pendingTx = PendingTransaction();
-    if (cfg.feedUrl.empty()) {
-        error = Tr(L"Není nastavená adresa aktualizací: doplň \"feedUrl\" do ", L"No update address is set: add \"feedUrl\" to ") +
-                JoinPath(DataDir(), L"config.json") + L".";
-        return false;
-    }
-    if (progress) progress(2, Tr(L"Stahuji seznam vydání…", L"Downloading the release list…"));
-    std::vector<uint8_t> feedRaw, sigRaw, manRaw;
-    if (!Fetch(cfg, "feed.json", feedRaw, error) || !Fetch(cfg, "feed.json.sig", sigRaw, error)) return false;
-    if (!VerifySignature(feedRaw, std::string(sigRaw.begin(), sigRaw.end()))) {
-        error = Tr(L"Podpis seznamu vydání nesouhlasí. Aktualizace se odmítá.", L"The signature of the release list does not match. The update is refused.");
-        LogLine("feed signature mismatch");
-        return false;
-    }
-    json feed;
-    try {
-        feed = json::parse(feedRaw.begin(), feedRaw.end());
-    } catch (...) {
-        error = Tr(L"Seznam vydání není platný JSON.", L"The release list is not valid JSON.");
-        return false;
-    }
-    if (!feed.contains("releases") || feed["releases"].empty()) { error = Tr(L"Feed neobsahuje žádné vydání.", L"The feed has no release."); return false; }
-    const json& rel = feed["releases"].back();
-    out.latest.id = rel.value("id", "");
-    out.latest.commit = rel.value("commit", "");
-    out.latest.date = rel.value("date", "");
-    for (auto& n : rel.value("notes", json::array())) out.latest.notes.push_back(n.get<std::string>());
-
-    auto loadManifest = [&](const json& r, json& m) {
-        std::vector<uint8_t> raw;
-        if (!Fetch(cfg, r.value("manifest", ""), raw, error)) return false;
-        if (Sha256Hex(raw.data(), raw.size()) != r.value("manifestSha256", "")) {
-            error = L"Manifest " + Widen(r.value("id", "")) + Tr(L" nesouhlasí s podepsaným seznamem vydání.", L" does not match the signed release list.");
-            return false;
-        }
-        m = json::parse(raw.begin(), raw.end());
-        return true;
-    };
-    if (progress) progress(5, Tr(L"Stahuji manifest ", L"Downloading manifest ") + Widen(out.latest.id) + L"…");
-    json manifest;
-    if (!loadManifest(rel, manifest)) return false;
-    const json& files = manifest["files"];
-
-    // The release this system is on (or else the one before the newest) tells which missing files are new
-    // in the update; files that were already shipped but are absent were left out by Setup on purpose.
-    const json* baseRel = nullptr;
-    const json& releases = feed["releases"];
-    for (auto& r : releases)
-        if (!out.installed.empty() && r.value("id", "") == out.installed) baseRel = &r;
-    if (!baseRel && releases.size() >= 2) baseRel = &releases[releases.size() - 2];
-    std::map<std::string, std::string> basePaths;  // lowercase path -> sha
-    if (baseRel && baseRel->value("id", "") != out.latest.id) {
-        json base;
-        if (!loadManifest(*baseRel, base)) return false;
-        for (auto& f : base["files"]) {
-            std::string k = f.value("path", "");
-            std::transform(k.begin(), k.end(), k.begin(), ::tolower);
-            basePaths[k] = f.value("sha256", "");
-        }
-    }
-    bool haveBase = !basePaths.empty();
-
-    // Hashing 2 000+ system files is slow; reuse hashes of files whose size and time did not change.
-    std::wstring cachePath = JoinPath(DataDir(), L"hashcache.json");
-    json cache = LoadJson(cachePath, json::object());
-    json newCache = json::object();
-    std::map<std::string, std::string> local;  // lowercase path -> sha of the file on disk ("" = missing)
-    std::map<std::string, std::string> newSha;  // lowercase path -> sha in the release
-    size_t i = 0;
-    for (auto& f : files) {
-        std::string path = f.value("path", ""), key = path;
-        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-        newSha[key] = f.value("sha256", "");
-        std::wstring target = TargetPath(cfg, path);
-        if (progress && (i % 25 == 0)) progress((int)(10 + 85 * i / std::max<size_t>(files.size(), 1)), Tr(L"Porovnávám ", L"Comparing ") + Widen(path));
-        i++;
-        std::string sha;
-        WIN32_FILE_ATTRIBUTE_DATA a;
-        if (GetFileAttributesExW(target.c_str(), GetFileExInfoStandard, &a) && !(a.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
-            uint64_t size = (uint64_t)a.nFileSizeHigh << 32 | a.nFileSizeLow;
-            uint64_t time = (uint64_t)a.ftLastWriteTime.dwHighDateTime << 32 | a.ftLastWriteTime.dwLowDateTime;
-            const json* hit = cache.contains(key) ? &cache[key] : nullptr;
-            if (hit && hit->size() == 3 && (*hit)[0] == size && (*hit)[1] == time) sha = (*hit)[2];
-            else sha = Sha256File(target);
-            if (sha.empty()) sha = "unreadable";
-            newCache[key] = json::array({size, time, sha});
-        }
-        local[key] = sha;
-    }
-    SaveJson(cachePath, newCache);
-
-    // Variant files (UP/MP kernel, HAL): keep the variant installed here and take its new version.
-    std::map<std::string, std::string> wanted = newSha;
-    for (auto& al : manifest.value("aliases", json::array())) {
-        std::string t = al.value("path", "");
-        std::transform(t.begin(), t.end(), t.begin(), ::tolower);
-        if (local[t].empty()) continue;
-        for (auto& c : al.value("candidates", json::array())) {
-            std::string k = c.get<std::string>();
-            std::transform(k.begin(), k.end(), k.begin(), ::tolower);
-            // The target matches the variant as it is installed here, or already its new version.
-            if (k != t && !newSha[k].empty() && (newSha[k] == local[t] || (!local[k].empty() && local[k] == local[t]))) {
-                wanted[t] = newSha[k];
-                break;
-            }
-        }
-    }
-
-    for (auto& f : files) {
-        std::string path = f.value("path", ""), key = path;
-        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
-        const std::string& have = local[key];
-        const std::string& want = wanted[key];
-        if (have == want) continue;
-        if (have.empty() && key.rfind("bootpartition/", 0) == 0) continue;  // loaders are only replaced, never added
-        if (have.empty() && (!haveBase || basePaths.count(key))) continue;  // left out by Setup, not new in this release
-        uint64_t size = f.value("size", (uint64_t)0);
-        if (want != f.value("sha256", ""))
-            for (auto& g : files)
-                if (g.value("sha256", "") == want) { size = g.value("size", (uint64_t)0); break; }
-        out.changes.push_back({path, want, size, have});
-    }
-    if (progress) progress(100, Tr(L"Změněných souborů: ", L"Changed files: ") + std::to_wstring(out.changes.size()) + L".");
-    return true;
-}
-
 InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::wstring& message, const Progress& progress) {
     if (!PendingTransaction().empty()) { message = Tr(L"Předchozí aktualizace čeká na restart.", L"The previous update waits for a restart."); return InstallOutcome::Failed; }
     if (check.changes.empty()) { message = Tr(L"Systém už odpovídá vydání ", L"The system already matches release ") + Widen(check.latest.id) + L"."; return InstallOutcome::NothingToDo; }
     std::string tx = NewTxId("install");
     std::wstring dir = TxDir(tx);
-    EnsureDirs(dir, false);
+    if (!EnsureDirs(dir, false)) {
+        message = Tr(L"Nelze vytvořit složku aktualizace: ", L"Cannot create the update folder: ") + LastErrorText(GetLastError());
+        return InstallOutcome::Failed;
+    }
     json hist = NewHistory(tx, "install", check.latest.id, check.changes.size());
     std::vector<Op> ops;
     uint64_t total = 0, done = 0;
     for (auto& c : check.changes) total += c.size;
     for (size_t i = 0; i < check.changes.size(); i++) {
         const Change& c = check.changes[i];
-        Op o{c.path, c.newSha, c.oldSha == "unreadable" ? "" : c.oldSha, JoinPath(dir, L"new\\" + std::to_wstring(i) + L".bin"), L""};
-        if (progress) progress((int)(60 * done / std::max<uint64_t>(total, 1)), L"Stahuji " + Widen(c.path));
-        std::vector<uint8_t> data;
-        std::wstring err;
-        if (!Fetch(cfg, "objects/" + c.newSha.substr(0, 2) + "/" + c.newSha, data, err) || Sha256Hex(data.data(), data.size()) != c.newSha) {
-            message = Tr(L"Stažení ", L"Download of ") + Widen(c.path) + Tr(L" selhalo: ", L" failed: ") +
-                      (err.empty() ? std::wstring(Tr(L"obsah nesouhlasí s manifestem", L"the contents do not match the manifest")) : err);
-            FinishHistory(hist, "failed", message);
-            return InstallOutcome::Failed;
-        }
-        if (!WriteFileAtomic(o.staged, data.data(), data.size())) {
-            message = Tr(L"Nelze uložit ", L"Cannot save ") + o.staged + L": " + LastErrorText(GetLastError());
-            FinishHistory(hist, "failed", message);
-            return InstallOutcome::Failed;
+        Op o{c.path, c.newSha, c.oldSha == "unreadable" ? "" : c.oldSha,
+             c.newSha.empty() ? L"" : JoinPath(dir, L"new\\" + std::to_wstring(i) + L".bin"), L""};
+        if (!c.newSha.empty()) {
+            if (progress) progress((int)(60 * done / std::max<uint64_t>(total, 1)), Tr(L"Stahuji ", L"Downloading ") + Widen(c.path));
+            std::vector<uint8_t> data;
+            std::wstring err;
+            if (!Fetch(cfg, "objects/" + c.newSha.substr(0, 2) + "/" + c.newSha, data, err) || Sha256Hex(data.data(), data.size()) != c.newSha) {
+                message = Tr(L"Stažení ", L"Download of ") + Widen(c.path) + Tr(L" selhalo: ", L" failed: ") +
+                          (err.empty() ? std::wstring(Tr(L"obsah nesouhlasí s manifestem", L"the contents do not match the manifest")) : err);
+                FinishHistory(hist, "failed", message);
+                return InstallOutcome::Failed;
+            }
+            if (!WriteFileAtomic(o.staged, data.data(), data.size())) {
+                message = Tr(L"Nelze uložit ", L"Cannot save ") + o.staged + L": " + LastErrorText(GetLastError());
+                FinishHistory(hist, "failed", message);
+                return InstallOutcome::Failed;
+            }
         }
         done += c.size;
         std::wstring target = TargetPath(cfg, c.path);
@@ -790,7 +699,11 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
     }
     json txj{{"tx", tx}, {"kind", "install"}, {"release", check.latest.id}, {"commit", check.latest.commit},
              {"installedBefore", InstalledRelease()}, {"ops", OpsToJson(ops)}, {"state", "prepared"}};
-    SaveJson(JoinPath(dir, L"tx.json"), txj);
+    if (!SaveJson(JoinPath(dir, L"tx.json"), txj)) {
+        message = Tr(L"Nelze uložit připravenou aktualizaci.", L"The prepared update cannot be saved.");
+        FinishHistory(hist, "failed", message);
+        return InstallOutcome::Failed;
+    }
     InstallOutcome r = RunTx(cfg, tx, txj, ops, hist, check.latest.id, message, progress);
     if (r == InstallOutcome::Installed) PruneTransactions(5);
     return r;
@@ -1224,6 +1137,31 @@ bool SelfTest(std::wstring& report) {
           L"/cancel drops the plan");
     check(LoadHistory().size() >= 3, L"history has the transactions");
 
+    // A partial boot rollback stays pending, preserves its sources and can finish on the next boot.
+    std::wstring retryBackup1 = JoinPath(base, L"retry-backup-1.bin");
+    std::wstring retryBackup2 = JoinPath(base, L"retry-backup-2.bin");
+    std::wstring retryTarget1 = JoinPath(base, L"retry-target-1.bin");
+    std::wstring retryTarget2 = JoinPath(base, L"retry-target-2.bin");
+    put(retryBackup1, "old-1");
+    put(retryTarget1, "new-1");
+    put(retryTarget2, "new-2");
+    DeleteFileW(retryBackup2.c_str());
+    WriteUtf16(BootFile(L"rollback.txt"), L"LUUP 1\nC\t" + NtPath(retryBackup1) + L"\t" + NtPath(retryTarget1) +
+                                                  L"\nC\t" + NtPath(retryBackup2) + L"\t" + NtPath(retryTarget2) + L"\n");
+    WriteTextAtomic(BootFile(L"trial"), "2");
+    NTSTATUS failedRollback = LuupBoot(dataNt.c_str(), TRUE, nullptr);
+    check(!NT_SUCCESS(failedRollback) && FileExists(BootFile(L"rollback.txt")) && FileExists(BootFile(L"trial")) &&
+              !FileExists(BootFile(L"rolledback")) && content(retryTarget1) == "old-1" && content(retryTarget2) == "new-2" &&
+              FileExists(retryBackup1),
+          L"partial boot rollback stays pending and keeps its source");
+    put(retryBackup2, "old-2");
+    NTSTATUS retriedRollback = LuupBoot(dataNt.c_str(), TRUE, nullptr);
+    check(NT_SUCCESS(retriedRollback) && !FileExists(BootFile(L"rollback.txt")) && !FileExists(BootFile(L"trial")) &&
+              FileExists(BootFile(L"rolledback")) && content(retryTarget1) == "old-1" && content(retryTarget2) == "old-2" &&
+              FileExists(retryBackup1) && FileExists(retryBackup2),
+          L"boot rollback finishes safely on retry");
+    ClearBootFiles();
+
     // Full check against a signed file:/// feed: MP kernel variant, a file Setup left out, a new file.
     {
         std::vector<uint8_t> seed, sk(64), pk(32), sigb(64);
@@ -1232,7 +1170,8 @@ bool SelfTest(std::wstring& report) {
         static const char* hexd = "0123456789abcdef";
         std::string pkhex;
         for (uint8_t v : pk) { pkhex += hexd[v >> 4]; pkhex += hexd[v & 15]; }
-        g_testPubKey = pkhex;
+        SetFeedTestPublicKey(pkhex);
+        long long sequence = 0;
         auto manifest = [&](const std::string& id, const std::vector<std::pair<std::string, std::string>>& fl) {
             json m{{"id", id}, {"commit", id}, {"date", "2026-01-01T00:00:00Z"}, {"files", json::array()},
                    {"aliases", json::array({json{{"path", "Windows/system32/ntoskrnl.exe"},
@@ -1240,26 +1179,32 @@ bool SelfTest(std::wstring& report) {
             for (auto& [p, content] : fl) m["files"].push_back({{"path", p}, {"sha256", obj(content)}, {"size", content.size()}});
             std::string raw = m.dump(1);
             put(JoinPath(feed, L"releases\\" + Widen(id) + L"\\manifest.json"), raw);
-            return json{{"id", id}, {"commit", id}, {"date", "2026-01-01T00:00:00Z"}, {"manifest", "releases/" + id + "/manifest.json"},
+            return json{{"sequence", ++sequence}, {"id", id}, {"commit", id}, {"date", "2026-01-01T00:00:00Z"}, {"manifest", "releases/" + id + "/manifest.json"},
                         {"manifestSha256", Sha256Hex(raw.data(), raw.size())}, {"notes", json::array({"test"})}};
         };
         json f{{"product", "LiberNT"}, {"format", 1}, {"releases", json::array()}};
         f["releases"].push_back(manifest("V1", {{"Windows/system32/ntoskrnl.exe", "UP1"}, {"Windows/system32/ntkrnlmp.exe", "MP1"},
-                                                {"Windows/system32/a.dll", "A1"}, {"Windows/system32/opt.exe", "OPT"}}));
+                                                {"Windows/system32/a.dll", "A1"}, {"Windows/system32/opt.exe", "OPT"},
+                                                {"Windows/system32/optional.exe", "OPTIONAL"}}));
         f["releases"].push_back(manifest("V2", {{"Windows/system32/ntoskrnl.exe", "UP2"}, {"Windows/system32/ntkrnlmp.exe", "MP2"},
-                                                {"Windows/system32/a.dll", "A2"}, {"Windows/system32/opt.exe", "OPT"},
+                                                {"Windows/system32/a.dll", "A2"}, {"Windows/system32/optional.exe", "OPTIONAL"},
                                                 {"Windows/system32/new.dll", "NEW"}}));
-        std::string fraw = f.dump(1);
-        put(JoinPath(feed, L"feed.json"), fraw);
-        crypto_ed25519_sign(sigb.data(), sk.data(), (const uint8_t*)fraw.data(), fraw.size());
-        std::string sighex;
-        for (uint8_t v : sigb) { sighex += hexd[v >> 4]; sighex += hexd[v & 15]; }
-        put(JoinPath(feed, L"feed.json.sig"), sighex);
+        auto writeSignedFeed = [&](const json& value) {
+            std::string raw = value.dump(1);
+            put(JoinPath(feed, L"feed.json"), raw);
+            crypto_ed25519_sign(sigb.data(), sk.data(), (const uint8_t*)raw.data(), raw.size());
+            std::string sighex;
+            for (uint8_t v : sigb) { sighex += hexd[v >> 4]; sighex += hexd[v & 15]; }
+            put(JoinPath(feed, L"feed.json.sig"), sighex);
+            return raw;
+        };
+        std::string fraw = writeSignedFeed(f);
 
         std::wstring root2 = JoinPath(base, L"root2");
         put(JoinPath(root2, L"Windows\\system32\\ntoskrnl.exe"), "MP1");  // Setup installed the MP kernel
         put(JoinPath(root2, L"Windows\\system32\\ntkrnlmp.exe"), "MP1");
         put(JoinPath(root2, L"Windows\\system32\\a.dll"), "A1");
+        put(JoinPath(root2, L"Windows\\system32\\opt.exe"), "OPT");
         Config cfg2{cfg.feedUrl, root2};
         json st = LoadState();
         st["installed"] = "";
@@ -1270,17 +1215,58 @@ bool SelfTest(std::wstring& report) {
         check(got, L"signed feed accepted: " + err);
         std::map<std::string, std::string> ch;
         for (auto& x : cr.changes) ch[x.path] = x.newSha;
-        check(cr.changes.size() == 4, L"4 changes found (got " + std::to_wstring(cr.changes.size()) + L")");
+        check(cr.changes.size() == 5, L"5 changes found, including one removal (got " + std::to_wstring(cr.changes.size()) + L")");
         check(ch["Windows/system32/ntoskrnl.exe"] == Sha256Hex("MP2", 3), L"kernel keeps the MP variant");
-        check(!ch.count("Windows/system32/opt.exe"), L"file left out by Setup is not added");
+        check(!ch.count("Windows/system32/optional.exe"), L"file left out by Setup is not added");
         check(ch.count("Windows/system32/new.dll") == 1, L"file new in the release is added");
+        check(ch.count("Windows/system32/opt.exe") == 1 && ch["Windows/system32/opt.exe"].empty(), L"file removed from the release is removed safely");
         InstallOutcome r2 = InstallUpdate(cfg2, cr, msg, nullptr);
         check(r2 == InstallOutcome::Installed && ReadFileBytes(JoinPath(root2, L"Windows\\system32\\ntoskrnl.exe"), b) &&
                   std::string(b.begin(), b.end()) == "MP2",
               L"installed kernel is the new MP kernel");
+        check(!FileExists(JoinPath(root2, L"Windows\\system32\\opt.exe")), L"removed file no longer exists");
         CheckResult again;
         CheckForUpdate(cfg2, again, err, nullptr);
         check(again.changes.empty(), L"second check finds nothing to do");
+
+        json replay = f;
+        replay["releases"].erase(replay["releases"].begin() + 1);
+        writeSignedFeed(replay);
+        check(!CheckForUpdate(cfg2, again, err, nullptr), L"older but validly signed feed is rejected");
+        json legacyReplay = replay;
+        for (auto& release : legacyReplay["releases"]) release.erase("sequence");
+        json legacyState = LoadState();
+        legacyState["feedSequence"] = 0;
+        legacyState["feedRelease"] = "V2";
+        SaveState(legacyState);
+        writeSignedFeed(legacyReplay);
+        check(!CheckForUpdate(cfg2, again, err, nullptr), L"older legacy feed without a sequence is rejected");
+        legacyState["feedSequence"] = 2;
+        SaveState(legacyState);
+        writeSignedFeed(f);
+
+        std::wstring latestManifestPath = JoinPath(feed, L"releases\\V2\\manifest.json");
+        std::vector<uint8_t> validManifestRaw;
+        ReadFileBytes(latestManifestPath, validManifestRaw);
+        json invalidManifest = json::parse(validManifestRaw.begin(), validManifestRaw.end());
+        invalidManifest["files"][0]["sha256"] = std::string(64, 'g');
+        std::string invalidManifestRaw = invalidManifest.dump(1);
+        put(latestManifestPath, invalidManifestRaw);
+        json invalidFeed = f;
+        invalidFeed["releases"][1]["manifestSha256"] = Sha256Hex(invalidManifestRaw.data(), invalidManifestRaw.size());
+        writeSignedFeed(invalidFeed);
+        check(!CheckForUpdate(cfg2, again, err, nullptr), L"signed manifest with a non-hex digest is rejected");
+
+        invalidManifest = json::parse(validManifestRaw.begin(), validManifestRaw.end());
+        invalidManifest["files"].push_back(invalidManifest["files"][0]);
+        invalidManifestRaw = invalidManifest.dump(1);
+        put(latestManifestPath, invalidManifestRaw);
+        invalidFeed = f;
+        invalidFeed["releases"][1]["manifestSha256"] = Sha256Hex(invalidManifestRaw.data(), invalidManifestRaw.size());
+        writeSignedFeed(invalidFeed);
+        check(!CheckForUpdate(cfg2, again, err, nullptr), L"signed manifest with a duplicate path is rejected");
+        WriteFileAtomic(latestManifestPath, validManifestRaw.data(), validManifestRaw.size());
+        writeSignedFeed(f);
 
         // The new MP kernel copied over ntoskrnl.exe by hand stays; it is not swapped for the UP one.
         std::wstring root3 = JoinPath(base, L"root3");
@@ -1293,7 +1279,7 @@ bool SelfTest(std::wstring& report) {
         check(!kernelTouched, L"kernel already at the new MP version is kept");
         put(JoinPath(feed, L"feed.json"), fraw + " ");
         check(!CheckForUpdate(cfg2, again, err, nullptr), L"tampered feed rejected");
-        g_testPubKey.clear();
+        SetFeedTestPublicKey("");
     }
 
     g_dataOverride.clear();

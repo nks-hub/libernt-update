@@ -55,7 +55,7 @@ bool WatchSelfUpdate(const std::string& tx);
 
 struct Change {
     std::string path;    ///< manifest path, forward slashes, relative to the root
-    std::string newSha;
+    std::string newSha;  ///< empty when the newest release removes this path
     uint64_t size = 0;
     std::string oldSha;  ///< empty when the file does not exist yet
 };

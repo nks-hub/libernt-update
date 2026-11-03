@@ -11,6 +11,12 @@
 #ifndef STATUS_ACCESS_DENIED
 #define STATUS_ACCESS_DENIED ((NTSTATUS)0xC0000022L)
 #endif
+#ifndef STATUS_OBJECT_NAME_NOT_FOUND
+#define STATUS_OBJECT_NAME_NOT_FOUND ((NTSTATUS)0xC0000034L)
+#endif
+#ifndef STATUS_OBJECT_PATH_NOT_FOUND
+#define STATUS_OBJECT_PATH_NOT_FOUND ((NTSTATUS)0xC000003AL)
+#endif
 #define LUUP_STATUS_INVALID_PARAMETER ((NTSTATUS)0xC000000DL)
 #define LUUP_STATUS_NO_MEMORY ((NTSTATUS)0xC0000017L)
 #define LUUP_STATUS_BAD_PLAN ((NTSTATUS)0xC000007BL) /* STATUS_INVALID_IMAGE_FORMAT */
@@ -160,9 +166,63 @@ NTSTATUS LuupDeleteFile(PCWSTR ntPath) {
     InitPath(&us, &oa, ntPath);
     st = NtOpenFile(&h, DELETE | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (st == STATUS_OBJECT_NAME_NOT_FOUND || st == STATUS_OBJECT_PATH_NOT_FOUND) return STATUS_SUCCESS;
     if (!NT_SUCCESS(st)) return st;
     st = NtSetInformationFile(h, &iosb, &del, sizeof(del), LUUP_FileDispositionInformation);
     NtClose(h);
+    return st;
+}
+
+static NTSTATUS LuupCopyFile(PCWSTR from, PCWSTR to) {
+    UNICODE_STRING us;
+    OBJECT_ATTRIBUTES oa;
+    IO_STATUS_BLOCK iosb;
+    HANDLE source = NULL, target = NULL;
+    LUUP_STANDARD_INFO si;
+    LUUP_BASIC_INFO bi;
+    NTSTATUS st;
+    PVOID buf = NULL;
+    ULONGLONG remaining;
+
+    InitPath(&us, &oa, from);
+    st = NtOpenFile(&source, GENERIC_READ | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (!NT_SUCCESS(st)) return st;
+    st = NtQueryInformationFile(source, &iosb, &si, sizeof(si), LUUP_FileStandardInformation);
+    if (NT_SUCCESS(st)) st = NtQueryInformationFile(source, &iosb, &bi, sizeof(bi), LUUP_FileBasicInformation);
+    if (!NT_SUCCESS(st)) goto out;
+
+    ClearReadOnly(to);
+    InitPath(&us, &oa, to);
+    st = NtCreateFile(&target, GENERIC_WRITE | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE, &oa, &iosb, NULL, bi.FileAttributes,
+                      0, FILE_OVERWRITE_IF, FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, 0);
+    if (!NT_SUCCESS(st)) goto out;
+    buf = Alloc(64u * 1024u);
+    if (!buf) {
+        st = LUUP_STATUS_NO_MEMORY;
+        goto out;
+    }
+    remaining = (ULONGLONG)si.EndOfFile.QuadPart;
+    while (remaining) {
+        ULONG chunk = remaining > 64u * 1024u ? 64u * 1024u : (ULONG)remaining;
+        st = NtReadFile(source, NULL, NULL, NULL, &iosb, buf, chunk, NULL, NULL);
+        if (!NT_SUCCESS(st) || iosb.Information != chunk) {
+            if (NT_SUCCESS(st)) st = LUUP_STATUS_BAD_PLAN;
+            break;
+        }
+        st = NtWriteFile(target, NULL, NULL, NULL, &iosb, buf, chunk, NULL, NULL);
+        if (!NT_SUCCESS(st) || iosb.Information != chunk) {
+            if (NT_SUCCESS(st)) st = LUUP_STATUS_BAD_PLAN;
+            break;
+        }
+        remaining -= chunk;
+    }
+    if (NT_SUCCESS(st)) st = NtFlushBuffersFile(target, &iosb);
+    if (NT_SUCCESS(st)) st = NtSetInformationFile(target, &iosb, &bi, sizeof(bi), LUUP_FileBasicInformation);
+out:
+    LuupFree(buf);
+    if (target) NtClose(target);
+    if (source) NtClose(source);
     return st;
 }
 
@@ -289,6 +349,7 @@ NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result, PCWSTR logNtPath)
         a = NextField(&cur);
         b = NextField(&cur);
         if (op[0] == L'M' && !op[1] && a && b) st = LuupRenameFile(a, b, TRUE);
+        else if (op[0] == L'C' && !op[1] && a && b) st = LuupCopyFile(a, b);
         else if (op[0] == L'D' && !op[1] && a) st = LuupDeleteFile(a);
         else st = LUUP_STATUS_INVALID_PARAMETER;
         if (NT_SUCCESS(st)) {
@@ -420,9 +481,13 @@ NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR te
         if (say) say(L"LiberNT Update: restoring the previous version...\n");
         st = LuupApplyPlan(rb, &r, rbLog);
         WriteResult(result, "rollback", &r, st);
-        LuupRenameFile(rb, rbDone, TRUE);
-        LuupDeleteFile(trial);
-        LuupWriteFile(marker, "rolledback\n", 11);
+        if (NT_SUCCESS(st) && !r.Failed) {
+            LuupRenameFile(rb, rbDone, TRUE);
+            LuupDeleteFile(trial);
+            LuupWriteFile(marker, "rolledback\n", 11);
+        } else if (NT_SUCCESS(st)) {
+            st = r.FirstFailure;
+        }
     }
 out:
     LuupFree(plan); LuupFree(planDone); LuupFree(rb); LuupFree(rbDone);

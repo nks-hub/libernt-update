@@ -12,7 +12,7 @@
 
 namespace {
 
-enum : int { IdCheck = 101, IdInstall, IdRollback, IdRestart, IdChanges, IdHistory, IdNotes };
+enum : int { IdCheck = 101, IdInstall, IdRollback, IdRestart, IdTabs, IdChanges, IdHistory, IdNotes };
 enum : UINT { WmProgress = WM_APP + 1, WmDone };
 enum class Job { Check, Install, Rollback };
 
@@ -24,10 +24,11 @@ struct DoneInfo {
     std::unique_ptr<CheckResult> check;
 };
 
-HWND g_wnd, g_info, g_status, g_progress, g_changes, g_history, g_notes, g_btn[4], g_lblChanges, g_lblHistory, g_lblNotes;
-HFONT g_font, g_bold;
+HWND g_wnd, g_heading, g_detail, g_status, g_progress, g_tabs, g_changes, g_history, g_notes, g_btn[4], g_lblNotes;
+HFONT g_font, g_bold, g_titleFont;
 CheckResult g_check;
 bool g_haveCheck = false, g_busy = false;
+int g_page = 0;
 
 void AddColumn(HWND lv, int i, const wchar_t* title, int width) {
     LVCOLUMNW c{LVCF_TEXT | LVCF_WIDTH};
@@ -69,13 +70,26 @@ std::wstring KindText(const std::string& k) {
     return Widen(k);
 }
 
+std::wstring CompactDate(const std::string& value) {
+    if (value.size() < 16) return Widen(value);
+    return Widen(value.substr(0, 10) + " " + value.substr(11, 5));
+}
+
+std::wstring CompactRelease(const std::string& value) {
+    if (value.size() >= 26 && value[8] == '-' && value[15] == '-')
+        return Widen(value.substr(0, 4) + "-" + value.substr(4, 2) + "-" + value.substr(6, 2) + " " + value.substr(9, 2) + ":" +
+                     value.substr(11, 2) + " ") +
+               L"\x00B7 " + Widen(value.substr(16));
+    return Widen(value);
+}
+
 void RefreshHistory() {
     ListView_DeleteAllItems(g_history);
     int row = 0;
     for (auto& h : LoadHistory()) {
-        SetCell(g_history, row, 0, Widen(h.started));
+        SetCell(g_history, row, 0, CompactDate(h.started));
         SetCell(g_history, row, 1, KindText(h.kind));
-        SetCell(g_history, row, 2, Widen(h.release));
+        SetCell(g_history, row, 2, CompactRelease(h.release));
         SetCell(g_history, row, 3, ResultText(h.result));
         SetCell(g_history, row, 4, std::to_wstring(h.files));
         SetCell(g_history, row, 5, Widen(h.message));
@@ -85,20 +99,26 @@ void RefreshHistory() {
 
 void RefreshInfo() {
     std::string inst = InstalledRelease(), pend = PendingTransaction();
-    std::wstring t = Tr(L"Nainstalované vydání: ", L"Installed release: ") +
-                      (inst.empty() ? std::wstring(Tr(L"zatím neevidováno", L"not recorded yet")) : Widen(inst));
+    std::wstring heading;
+    if (g_busy) heading = Tr(L"Pracuji na aktualizaci", L"Working on the update");
+    else if (!pend.empty()) heading = Tr(L"Aktualizace čeká na restart", L"The update needs a restart");
+    else if (!g_haveCheck) heading = Tr(L"Kontroluji aktualizace", L"Checking for updates");
+    else if (g_check.changes.empty()) heading = Tr(L"Systém je aktuální", L"The system is up to date");
+    else heading = Tr(L"Je k dispozici aktualizace", L"An update is available");
+    SetWindowTextW(g_heading, heading.c_str());
+
+    std::wstring detail = Tr(L"Nainstalováno: ", L"Installed: ") +
+                          (inst.empty() ? std::wstring(Tr(L"zatím neevidováno", L"not recorded yet")) : CompactRelease(inst));
     if (g_haveCheck) {
-        t += Tr(L"\r\nNejnovější vydání: ", L"\r\nNewest release: ") + Widen(g_check.latest.id) + L" (commit " + Widen(g_check.latest.commit.substr(0, 10)) + L", " +
-             Widen(g_check.latest.date) + L")";
-        t += g_check.changes.empty() ? std::wstring(Tr(L"\r\nSystém je aktuální.", L"\r\nThe system is up to date."))
-                                      : Tr(L"\r\nSouborů k aktualizaci: ", L"\r\nFiles to update: ") + std::to_wstring(g_check.changes.size());
+        detail += Tr(L"\r\nNejnovější: ", L"\r\nNewest: ") + CompactRelease(g_check.latest.id);
+        if (!g_check.changes.empty())
+            detail += Tr(L"  ·  souborů ke změně: ", L"  ·  files to change: ") + std::to_wstring(g_check.changes.size());
     }
-    if (!pend.empty()) t += Tr(L"\r\nAktualizace ", L"\r\nUpdate ") + Widen(pend) + Tr(L" čeká na restart.", L" waits for a restart.");
-    SetWindowTextW(g_info, t.c_str());
+    SetWindowTextW(g_detail, detail.c_str());
     EnableWindow(g_btn[0], !g_busy);
     EnableWindow(g_btn[1], !g_busy && g_haveCheck && !g_check.changes.empty() && pend.empty());
     EnableWindow(g_btn[2], !g_busy && pend.empty());
-    EnableWindow(g_btn[3], !g_busy);
+    EnableWindow(g_btn[3], !g_busy && !pend.empty());
 }
 
 /// Keyboard focus on the first enabled button when nothing in the window has it (at start, after a job disabled the
@@ -116,11 +136,14 @@ void ShowCheck() {
     for (auto& c : g_check.changes) {
         SetCell(g_changes, row, 0, Widen(c.path));
         SetCell(g_changes, row, 1, Size(c.size));
-        SetCell(g_changes, row, 2, c.oldSha.empty() ? Tr(L"nový", L"new") : Tr(L"změněný", L"changed"));
+        SetCell(g_changes, row, 2, c.newSha.empty() ? Tr(L"odstraněný", L"removed")
+                                                    : c.oldSha.empty() ? Tr(L"nový", L"new") : Tr(L"změněný", L"changed"));
         row++;
     }
+    if (!row) SetCell(g_changes, 0, 0, Tr(L"Žádné soubory není potřeba měnit.", L"No files need to be changed."));
     std::wstring notes;
     for (auto& n : g_check.latest.notes) notes += Widen(n) + L"\r\n";
+    if (notes.empty()) notes = Tr(L"K tomuto vydání nejsou poznámky.", L"This release has no notes.");
     SetWindowTextW(g_notes, notes.c_str());
 }
 
@@ -152,22 +175,42 @@ void Start(Job job) {
     }).detach();
 }
 
+void ShowPage(int page) {
+    g_page = page;
+    ShowWindow(g_lblNotes, page == 0 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_notes, page == 0 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_changes, page == 1 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_history, page == 2 ? SW_SHOW : SW_HIDE);
+}
+
 void Layout(int w, int h) {
-    const int m = 10, bw = 150, bh = 28;
-    MoveWindow(g_info, m, m, w - 2 * m, 58, TRUE);
-    for (int i = 0; i < 4; i++) MoveWindow(g_btn[i], m + i * (bw + 8), 74, bw, bh, TRUE);
-    MoveWindow(g_progress, m, 110, w - 2 * m, 16, TRUE);
-    MoveWindow(g_status, m, 130, w - 2 * m, 20, TRUE);
-    int top = 156, rest = h - top - m;
-    int changesH = rest * 40 / 100, historyH = rest * 35 / 100, notesH = rest - changesH - historyH - 3 * 20;
-    MoveWindow(g_lblChanges, m, top, w - 2 * m, 18, TRUE);
-    MoveWindow(g_changes, m, top + 20, w - 2 * m, changesH, TRUE);
-    top += 20 + changesH;
-    MoveWindow(g_lblHistory, m, top + 2, w - 2 * m, 18, TRUE);
-    MoveWindow(g_history, m, top + 22, w - 2 * m, historyH, TRUE);
-    top += 22 + historyH;
-    MoveWindow(g_lblNotes, m, top + 2, w - 2 * m, 18, TRUE);
-    MoveWindow(g_notes, m, top + 22, w - 2 * m, std::max(40, notesH), TRUE);
+    const int m = 24, gap = 8, bh = 30;
+    MoveWindow(g_heading, m, 18, w - 2 * m, 32, TRUE);
+    MoveWindow(g_detail, m, 52, w - 2 * m, 42, TRUE);
+    int actionY = 101;
+    MoveWindow(g_btn[0], m, actionY, 118, bh, TRUE);
+    MoveWindow(g_btn[2], m + 118 + gap, actionY, 166, bh, TRUE);
+    MoveWindow(g_btn[3], w - m - 132, actionY, 132, bh, TRUE);
+    MoveWindow(g_btn[1], w - m - 132 - gap - 150, actionY, 150, bh, TRUE);
+    MoveWindow(g_progress, m, 143, w - 2 * m, 8, TRUE);
+    MoveWindow(g_status, m, 157, w - 2 * m, 20, TRUE);
+    int tabTop = 184;
+    MoveWindow(g_tabs, m, tabTop, w - 2 * m, h - tabTop - m, TRUE);
+    int x = m + 12, y = tabTop + 36, cw = w - 2 * (m + 12), ch = h - y - m - 12;
+    MoveWindow(g_lblNotes, x, y, cw, 20, TRUE);
+    MoveWindow(g_notes, x, y + 24, cw, std::max(40, ch - 24), TRUE);
+    MoveWindow(g_changes, x, y, cw, ch, TRUE);
+    MoveWindow(g_history, x, y, cw, ch, TRUE);
+    ListView_SetColumnWidth(g_changes, 0, std::max(220, cw - 190));
+    ListView_SetColumnWidth(g_changes, 1, 85);
+    ListView_SetColumnWidth(g_changes, 2, 95);
+    int message = std::max(130, cw - 531);
+    ListView_SetColumnWidth(g_history, 0, 116);
+    ListView_SetColumnWidth(g_history, 1, 90);
+    ListView_SetColumnWidth(g_history, 2, 170);
+    ListView_SetColumnWidth(g_history, 3, 95);
+    ListView_SetColumnWidth(g_history, 4, 60);
+    ListView_SetColumnWidth(g_history, 5, message);
 }
 
 HWND Make(const wchar_t* cls, const wchar_t* text, DWORD style, int id, DWORD ex = 0) {
@@ -180,31 +223,39 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
             g_wnd = w;
-            g_info = Make(L"STATIC", L"", SS_LEFT, 0);
-            SendMessageW(g_info, WM_SETFONT, (WPARAM)g_bold, TRUE);
-            const wchar_t* labels[4] = {Tr(L"&Zkontrolovat", L"&Check"), Tr(L"&Nainstalovat", L"&Install"), Tr(L"&Vrátit poslední", L"&Undo last"),
-                                        Tr(L"&Restartovat", L"&Restart")};
-            for (int i = 0; i < 4; i++) g_btn[i] = Make(L"BUTTON", labels[i], BS_PUSHBUTTON | WS_TABSTOP, IdCheck + i);
+            g_heading = Make(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS, 0);
+            SendMessageW(g_heading, WM_SETFONT, (WPARAM)g_titleFont, TRUE);
+            g_detail = Make(L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS, 0);
+            const wchar_t* labels[4] = {Tr(L"&Zkontrolovat znovu", L"&Check again"), Tr(L"&Nainstalovat", L"&Install update"),
+                                        Tr(L"&Vrátit poslední", L"&Undo last update"), Tr(L"&Restartovat", L"&Restart")};
+            for (int i : {0, 2, 1, 3})
+                g_btn[i] = Make(L"BUTTON", labels[i], (i == 1 ? BS_DEFPUSHBUTTON : BS_PUSHBUTTON) | WS_TABSTOP, IdCheck + i);
             g_progress = Make(PROGRESS_CLASSW, L"", 0, 0);
             SendMessageW(g_progress, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
             g_status = Make(L"STATIC", Tr(L"Připraveno.", L"Ready."), SS_LEFT | SS_ENDELLIPSIS, 0);
-            g_lblChanges = Make(L"STATIC", Tr(L"Soubory, které aktualizace změní", L"Files the update changes"), SS_LEFT, 0);
-            g_changes = Make(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER, IdChanges);
+            g_tabs = Make(WC_TABCONTROLW, L"", WS_TABSTOP, IdTabs);
+            TCITEMW tab{TCIF_TEXT};
+            for (const wchar_t* label : {Tr(L"Přehled", L"Overview"), Tr(L"Změny", L"Changes"), Tr(L"Historie", L"History")}) {
+                tab.pszText = const_cast<LPWSTR>(label);
+                TabCtrl_InsertItem(g_tabs, TabCtrl_GetItemCount(g_tabs), &tab);
+            }
+            g_changes = Make(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, IdChanges);
             ListView_SetExtendedListViewStyle(g_changes, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
             AddColumn(g_changes, 0, Tr(L"Soubor", L"File"), 480);
             AddColumn(g_changes, 1, Tr(L"Velikost", L"Size"), 90);
             AddColumn(g_changes, 2, Tr(L"Typ", L"Kind"), 90);
-            g_lblHistory = Make(L"STATIC", Tr(L"Historie aktualizací", L"Update history"), SS_LEFT, 0);
-            g_history = Make(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER, IdHistory);
+            g_history = Make(WC_LISTVIEWW, L"", LVS_REPORT | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, IdHistory);
             ListView_SetExtendedListViewStyle(g_history, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
             AddColumn(g_history, 0, Tr(L"Začátek (UTC)", L"Started (UTC)"), 140);
             AddColumn(g_history, 1, Tr(L"Akce", L"Action"), 120);
             AddColumn(g_history, 2, Tr(L"Vydání", L"Release"), 190);
             AddColumn(g_history, 3, Tr(L"Výsledek", L"Result"), 120);
-            AddColumn(g_history, 4, Tr(L"Souborů", L"Files"), 60);
+            AddColumn(g_history, 4, Tr(L"Počet", L"Files"), 60);
             AddColumn(g_history, 5, Tr(L"Zpráva", L"Message"), 400);
-            g_lblNotes = Make(L"STATIC", Tr(L"Poznámky k vydání (změny ve zdrojích)", L"Release notes (source changes)"), SS_LEFT, 0);
-            g_notes = Make(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER, IdNotes);
+            g_lblNotes = Make(L"STATIC", Tr(L"Poznámky k nejnovějšímu vydání", L"Notes for the newest release"), SS_LEFT, 0);
+            SendMessageW(g_lblNotes, WM_SETFONT, (WPARAM)g_bold, TRUE);
+            g_notes = Make(L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL | WS_BORDER | WS_TABSTOP, IdNotes);
+            ShowPage(0);
             RefreshHistory();
             RefreshInfo();
             std::string pend = PendingTransaction();
@@ -219,7 +270,15 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             Layout(LOWORD(lp), HIWORD(lp));
             return 0;
         case WM_GETMINMAXINFO:
-            ((MINMAXINFO*)lp)->ptMinTrackSize = {720, 560};
+            ((MINMAXINFO*)lp)->ptMinTrackSize = {720, 520};
+            return 0;
+        case WM_NOTIFY:
+            if (((NMHDR*)lp)->idFrom == IdTabs && ((NMHDR*)lp)->code == TCN_SELCHANGE) {
+                ShowPage(TabCtrl_GetCurSel(g_tabs));
+                RECT r;
+                GetClientRect(w, &r);
+                Layout(r.right, r.bottom);
+            }
             return 0;
         case WM_COMMAND:
             switch (LOWORD(wp)) {
@@ -229,16 +288,16 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                                      Tr(L"?\r\n\r\nPůvodní soubory se zálohují; když se něco nepovede, vrátí se automaticky.",
                                         L"?\r\n\r\nThe current files are backed up; if anything fails they come back automatically."))
                                         .c_str(),
-                                    L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES)
+                                    L"LiberNT Update", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES)
                         Start(Job::Install);
                     break;
                 case IdRollback:
-                    if (MessageBoxW(w, Tr(L"Vrátit poslední nainstalovanou aktualizaci?", L"Undo the last installed update?"), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES)
+                    if (MessageBoxW(w, Tr(L"Vrátit poslední nainstalovanou aktualizaci?", L"Undo the last installed update?"), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES)
                         Start(Job::Rollback);
                     break;
                 case IdRestart: {
                     std::wstring err;
-                    if (MessageBoxW(w, Tr(L"Restartovat počítač nyní?", L"Restart the computer now?"), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES && !RestartSystem(err))
+                    if (MessageBoxW(w, Tr(L"Restartovat počítač nyní?", L"Restart the computer now?"), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES && !RestartSystem(err))
                         MessageBoxW(w, err.c_str(), L"LiberNT Update", MB_ICONERROR);
                     break;
                 }
@@ -266,7 +325,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             }
             if (!d->ok) MessageBoxW(w, d->message.c_str(), L"LiberNT Update", MB_ICONERROR);
             if (d->outcome == InstallOutcome::PendingRestart &&
-                MessageBoxW(w, (d->message + Tr(L"\r\n\r\nRestartovat nyní?", L"\r\n\r\nRestart now?")).c_str(), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION) == IDYES) {
+                MessageBoxW(w, (d->message + Tr(L"\r\n\r\nRestartovat nyní?", L"\r\n\r\nRestart now?")).c_str(), L"LiberNT Update", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) == IDYES) {
                 std::wstring err;
                 if (!RestartSystem(err)) MessageBoxW(w, err.c_str(), L"LiberNT Update", MB_ICONERROR);
             }
@@ -274,9 +333,17 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             RefreshHistory();
             RefreshInfo();
             FocusFirstButton();
-            SendMessageW(g_progress, PBM_SETPOS, 100, 0);
+            SendMessageW(g_progress, PBM_SETPOS, d->ok ? 100 : 0, 0);
             return 0;
         }
+        case WM_CLOSE:
+            if (g_busy) {
+                MessageBoxW(w, Tr(L"Probíhající operaci je potřeba nechat dokončit.", L"Let the current operation finish before closing the window."),
+                            L"LiberNT Update", MB_OK | MB_ICONINFORMATION);
+                return 0;
+            }
+            DestroyWindow(w);
+            return 0;
         case WM_DESTROY:
             PostQuitMessage(0);
             return 0;
@@ -287,7 +354,7 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
 }  // namespace
 
 int RunGui(HINSTANCE inst) {
-    INITCOMMONCONTROLSEX icc{sizeof icc, ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_STANDARD_CLASSES};
+    INITCOMMONCONTROLSEX icc{sizeof icc, ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS | ICC_TAB_CLASSES | ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&icc);
     NONCLIENTMETRICSW ncm{sizeof ncm};
     SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof ncm, &ncm, 0);
@@ -295,6 +362,9 @@ int RunGui(HINSTANCE inst) {
     LOGFONTW bold = ncm.lfMessageFont;
     bold.lfWeight = FW_SEMIBOLD;
     g_bold = CreateFontIndirectW(&bold);
+    LOGFONTW title = bold;
+    title.lfHeight = -22;
+    g_titleFont = CreateFontIndirectW(&title);
 
     WNDCLASSEXW wc{sizeof wc};
     wc.lpfnWndProc = WndProc;
@@ -304,12 +374,23 @@ int RunGui(HINSTANCE inst) {
     wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(1));
     wc.lpszClassName = L"LiberNTUpdateWindow";
     RegisterClassExW(&wc);
-    std::wstring title = L"LiberNT Update " + Widen(ClientVersion());
-    HWND w = CreateWindowExW(0, wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 900, 680,
+    std::wstring windowTitle = L"LiberNT Update " + Widen(ClientVersion());
+    RECT work;
+    SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    const int ww = 840, wh = 620;
+    int x = work.left + std::max(0L, (work.right - work.left - ww) / 2);
+    int y = work.top + std::max(0L, (work.bottom - work.top - wh) / 2);
+    HWND w = CreateWindowExW(0, wc.lpszClassName, windowTitle.c_str(), WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, x, y, ww, wh,
                              nullptr, nullptr, inst, nullptr);
     ShowWindow(w, SW_SHOW);
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        HWND focused = GetFocus();
+        int id = focused ? GetDlgCtrlID(focused) : 0;
+        if (m.message == WM_KEYDOWN && m.wParam == VK_RETURN && id >= IdCheck && id <= IdRestart && IsWindowEnabled(focused)) {
+            SendMessageW(focused, BM_CLICK, 0, 0);
+            continue;
+        }
         if (!IsDialogMessageW(w, &m)) {
             TranslateMessage(&m);
             DispatchMessageW(&m);

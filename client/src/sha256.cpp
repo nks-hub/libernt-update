@@ -40,11 +40,20 @@ void Sha256::block(const uint8_t* p) {
 void Sha256::update(const void* data, size_t len) {
     auto p = static_cast<const uint8_t*>(data);
     total_ += len;
-    while (len) {
+    if (used_) {
         size_t n = 64 - used_ < len ? 64 - used_ : len;
         memcpy(buf_ + used_, p, n);
         used_ += n; p += n; len -= n;
         if (used_ == 64) { block(buf_); used_ = 0; }
+    }
+    while (len >= 64) {
+        block(p);
+        p += 64;
+        len -= 64;
+    }
+    if (len) {
+        memcpy(buf_, p, len);
+        used_ = len;
     }
 }
 
@@ -59,6 +68,7 @@ std::string Sha256::hex() {
     update(len, 8);
     static const char* digits = "0123456789abcdef";
     std::string out;
+    out.reserve(64);
     for (uint32_t v : h_)
         for (int s = 28; s >= 0; s -= 4) out += digits[(v >> s) & 15];
     return out;

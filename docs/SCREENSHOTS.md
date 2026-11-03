@@ -14,13 +14,13 @@ Installing asks first; the current files are backed up before anything is replac
 
 # An update from upstream changes
 
-The rest of this page shows a Czech system. Recorded on 3 November 2026 on a LiberNT amd64 VM (BIOS, 2 CPUs) running client v0.2.4. The fork's `Sync upstream` workflow merged 30 upstream commits (up to `0a41bd8`, 65 changed source files) into `nks` as `cd663698bd`; `build-release.sh` built the image and published release `20261103-172154-cd663698bd`.
+The rest of this page shows a Czech system. The update run was recorded on 3 November 2026 on a LiberNT amd64 VM (BIOS, 2 CPUs) running client v0.2.4. The window screenshots were refreshed with v0.2.8 on the same VM; the counts and log below remain those of the original run. The fork's `Sync upstream` workflow merged 30 upstream commits (up to `0a41bd8`, 65 changed source files) into `nks` as `cd663698bd`; `build-release.sh` built the image and published release `20261103-172154-cd663698bd`.
 
 ## 1. The update is offered
 
 ![Update window](images/update-available.png)
 
-The window compares the release with the disk: 1514 files differ on this machine. The notes at the bottom are the commit subjects between the installed and the new release. This release was published before the build-metadata filter existed; with the filter the same upstream merge carries 516 changed files (1004 of the 1520 rebuilt files differ only in time stamps, checksums, debug ids and the build tag).
+The refreshed window shows a one-file client update. In the original upstream run, 1514 files differed on this machine. That release was published before the build-metadata filter existed; with the filter the same upstream merge carries 516 changed files (1004 of the 1520 rebuilt files differ only in time stamps, checksums, debug ids and the build tag).
 
 ## 2. Waiting for the restart
 
@@ -38,7 +38,7 @@ While the update is pending, `freeldr.ini` has the entry **LiberNT (undo the las
 
 ![Window after the update](images/after-upstream-update.png)
 
-At boot `luupboot.exe` moved 1514 of 1514 files (`luupboot: plan done 1514 failed 0`), the service verified every file and recorded the release as installed. The next release, built from the same commit after reconfiguring so that the build tag names the commit, changes only the two kernel variants: everything else differs only in build metadata and keeps the previous contents, so the machine downloads 10 MB instead of the whole system.
+The refreshed window shows the final up-to-date state. In the original run, `luupboot.exe` moved 1514 of 1514 files at boot (`luupboot: plan done 1514 failed 0`), and the service verified every file and recorded the release as installed. The next release, built from the same commit after reconfiguring so that the build tag names the commit, changes only the two kernel variants: everything else differs only in build metadata and keeps the previous contents, so the machine downloads 10 MB instead of the whole system.
 
 `update.log` of this update:
 

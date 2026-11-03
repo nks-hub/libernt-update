@@ -107,7 +107,7 @@ int Cli(const std::wstring& cmd) {
         if (!c.pendingTx.empty()) Out(L"pending:   " + Widen(c.pendingTx) + L" (restart needed)");
         Out(L"changed:   " + std::to_wstring(c.changes.size()) + L" files");
         for (auto& ch : c.changes)
-            Out((ch.oldSha.empty() ? L"  new     " : L"  changed ") + Widen(ch.path) + L"  " + Widen(ch.oldSha.substr(0, 12)) + L" -> " +
+            Out((ch.newSha.empty() ? L"  removed " : ch.oldSha.empty() ? L"  new     " : L"  changed ") + Widen(ch.path) + L"  " + Widen(ch.oldSha.substr(0, 12)) + L" -> " +
                 Widen(ch.newSha.substr(0, 12)));
         if (cmd == L"/check") return 0;
         std::wstring msg, svcErr;
