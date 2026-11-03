@@ -232,15 +232,45 @@ static PWSTR NextField(PWSTR* cursor) {
     return start;
 }
 
-NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result) {
+#define LUUP_LOG_CHARS (128u * 1024u)
+
+typedef struct {
+    PWSTR buf;
+    ULONG len;
+} LUUP_LOG;
+
+static void LogStr(LUUP_LOG* log, PCWSTR s) {
+    if (!log->buf) return;
+    while (*s && log->len + 1 < LUUP_LOG_CHARS) log->buf[log->len++] = *s++;
+}
+
+static void LogHex(LUUP_LOG* log, ULONG v, int base) {
+    WCHAR tmp[12];
+    int n = 0;
+    do {
+        tmp[n++] = L"0123456789abcdef"[v % base];
+        v /= base;
+    } while (v);
+    while (n && log->buf && log->len + 1 < LUUP_LOG_CHARS) log->buf[log->len++] = tmp[--n];
+}
+
+NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result, PCWSTR logNtPath) {
     PVOID data;
     ULONG size, lineNo = 0;
     PWSTR text, end, line;
     NTSTATUS st;
+    LUUP_LOG log = {NULL, 0};
 
     Fill(result, 0, sizeof(*result));
+    if (logNtPath) {
+        log.buf = (PWSTR)Alloc(LUUP_LOG_CHARS * sizeof(WCHAR));
+        if (log.buf) log.buf[log.len++] = 0xFEFF;
+    }
     st = LuupReadFile(planNtPath, &data, &size);
-    if (!NT_SUCCESS(st)) return st;
+    if (!NT_SUCCESS(st)) {
+        LuupFree(log.buf);
+        return st;
+    }
     text = (PWSTR)data;
     end = text + size / sizeof(WCHAR);
     if (text < end && *text == 0xFEFF) text++;
@@ -248,6 +278,7 @@ NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result) {
     lineNo = 1;
     if (!line || line[0] != L'L' || line[1] != L'U' || line[2] != L'U' || line[3] != L'P') {
         LuupFree(data);
+        LuupFree(log.buf);
         return LUUP_STATUS_BAD_PLAN;
     }
     while ((line = NextLine(&text, end)) != NULL) {
@@ -268,9 +299,26 @@ NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result) {
                 result->FirstFailure = st;
             }
             result->Failed++;
+            LogStr(&log, L"line ");
+            LogHex(&log, lineNo, 10);
+            LogStr(&log, L" status ");
+            LogHex(&log, (ULONG)st, 16);
+            LogStr(&log, L": ");
+            LogStr(&log, op);
+            LogStr(&log, L" ");
+            LogStr(&log, a ? a : L"");
+            if (b) {
+                LogStr(&log, L" -> ");
+                LogStr(&log, b);
+            }
+            LogStr(&log, L"\n");
         }
     }
     LuupFree(data);
+    if (log.buf) {
+        LuupWriteFile(logNtPath, log.buf, log.len * sizeof(WCHAR));
+        LuupFree(log.buf);
+    }
     return STATUS_SUCCESS;
 }
 
@@ -337,6 +385,7 @@ NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR te
     PWSTR rb = BootFile(dataDirNt, L"rollback.txt"), rbDone = BootFile(dataDirNt, L"rollback.done");
     PWSTR trial = BootFile(dataDirNt, L"trial"), result = BootFile(dataDirNt, L"result.txt");
     PWSTR marker = BootFile(dataDirNt, L"rolledback"), cancelled = BootFile(dataDirNt, L"plan.cancelled");
+    PWSTR planLog = BootFile(dataDirNt, L"plan.log"), rbLog = BootFile(dataDirNt, L"rollback.log");
     LUUP_RESULT r;
     NTSTATUS st = STATUS_SUCCESS;
     BOOLEAN rollback = FALSE;
@@ -354,7 +403,7 @@ NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR te
             goto out;
         }
         if (say) say(L"LiberNT Update: installing the update...\n");
-        st = LuupApplyPlan(plan, &r);
+        st = LuupApplyPlan(plan, &r, planLog);
         WriteResult(result, "plan", &r, st);
         LuupRenameFile(plan, planDone, TRUE);
         WriteCount(trial, 1);
@@ -369,7 +418,7 @@ NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR te
     }
     if (rollback && LuupFileExists(rb)) {
         if (say) say(L"LiberNT Update: restoring the previous version...\n");
-        st = LuupApplyPlan(rb, &r);
+        st = LuupApplyPlan(rb, &r, rbLog);
         WriteResult(result, "rollback", &r, st);
         LuupRenameFile(rb, rbDone, TRUE);
         LuupDeleteFile(trial);
@@ -378,5 +427,6 @@ NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR te
 out:
     LuupFree(plan); LuupFree(planDone); LuupFree(rb); LuupFree(rbDone);
     LuupFree(trial); LuupFree(result); LuupFree(marker); LuupFree(cancelled);
+    LuupFree(planLog); LuupFree(rbLog);
     return st;
 }

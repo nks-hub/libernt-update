@@ -24,8 +24,9 @@ typedef struct LUUP_RESULT {
     NTSTATUS FirstFailure;
 } LUUP_RESULT;
 
-/* Applies every line of the plan in order and keeps going after a failed line. */
-NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result);
+/* Applies every line of the plan in order and keeps going after a failed line; every failed line goes to the
+ * UTF-16 log file logNtPath (may be NULL). */
+NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result, PCWSTR logNtPath);
 
 /* One boot of luupboot.exe. dataDirNt is the client's data folder as an NT path; its boot\ subfolder holds
  *   plan.txt      update to apply now (renamed to plan.done afterwards, and "trial" is created)

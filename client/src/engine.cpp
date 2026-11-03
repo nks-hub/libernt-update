@@ -5,6 +5,7 @@
 #include <shlobj.h>
 
 #include <algorithm>
+#include <ctime>
 #include <map>
 
 #include "http.h"
@@ -66,9 +67,32 @@ bool Fetch(const Config& cfg, const std::string& rel, std::vector<uint8_t>& out,
     return HttpGet(url, out, error);
 }
 
+/// Root of the EFI system partition (\\?\Volume{...}\) when this is a UEFI install, empty otherwise.
+std::wstring EspRoot() {
+    static bool done = false;
+    static std::wstring esp;
+    if (done || !g_dataOverride.empty()) return esp;
+    done = true;
+    wchar_t vol[MAX_PATH];
+    HANDLE f = FindFirstVolumeW(vol, MAX_PATH);
+    if (f == INVALID_HANDLE_VALUE) return esp;
+    do {
+        if (FileExists(std::wstring(vol) + L"EFI\\LiberNT\\Boot\\bootmgfw.efi")) { esp = vol; break; }
+    } while (FindNextVolumeW(f, vol, MAX_PATH));
+    FindVolumeClose(f);
+    return esp;
+}
+
+/// Disk path of a manifest path. BootPartition/ (the image's boot partition) maps to the EFI system partition on UEFI
+/// installs and to the root of the system drive on BIOS installs, where Setup puts freeldr.sys and rosload.exe.
 std::wstring TargetPath(const Config& cfg, const std::string& rel) {
     std::wstring p = Widen(rel);
     std::replace(p.begin(), p.end(), L'/', L'\\');
+    const std::wstring boot = L"BootPartition\\";
+    if (p.size() > boot.size() && _wcsnicmp(p.c_str(), boot.c_str(), boot.size()) == 0) {
+        std::wstring esp = EspRoot();
+        return JoinPath(esp.empty() ? cfg.root : esp, p.substr(boot.size()));
+    }
     return JoinPath(cfg.root, p);
 }
 
@@ -117,6 +141,19 @@ json HistoryFor(const std::string& tx) {
     return json::object();
 }
 
+std::wstring OwnExe() {
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    return exe;
+}
+
+/// The client's own folder: its running exe can be renamed aside and replaced without a restart.
+bool IsOwnFile(const std::wstring& path) {
+    std::wstring exe = OwnExe(), dir = exe.substr(0, exe.find_last_of(L'\\') + 1);
+    return path.size() > dir.size() && _wcsnicmp(path.c_str(), dir.c_str(), dir.size()) == 0 &&
+           path.find(L'\\', dir.size()) == std::wstring::npos;
+}
+
 /// A file someone has open or mapped (a loaded DLL, the running kernel) cannot be replaced now.
 bool InUse(const std::wstring& path) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE | DELETE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -127,7 +164,9 @@ bool InUse(const std::wstring& path) {
 
 std::wstring BootDir() { return JoinPath(DataDir(), L"boot"); }
 std::wstring BootFile(const wchar_t* name) { return JoinPath(BootDir(), name); }
-std::wstring NtPath(const std::wstring& win) { return L"\\??\\" + win; }
+std::wstring NtPath(const std::wstring& win) {
+    return win.rfind(L"\\\\?\\", 0) == 0 ? L"\\??\\" + win.substr(4) : L"\\??\\" + win;
+}
 
 bool WriteUtf16(const std::wstring& path, const std::wstring& text) {
     std::string bytes("\xFF\xFE", 2);
@@ -240,27 +279,59 @@ std::vector<Op> OpsFromJson(const json& a) {
     return ops;
 }
 
-/// Puts back the backups of the ops already applied (in reverse) after a failure in the middle.
-void UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t applied) {
+/// Puts back the backups of the ops already applied (in reverse) after a failure in the middle. Every step goes to
+/// update.log; the returned text is empty when all files are back and names the ones that are not otherwise.
+std::wstring UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t applied, const std::string& tx) {
+    size_t failed = 0;
+    std::wstring first;
     for (size_t i = applied; i-- > 0;) {
         std::wstring target = TargetPath(cfg, ops[i].path);
-        if (!ops[i].backup.empty()) CopyFileW(ops[i].backup.c_str(), target.c_str(), FALSE);
-        else DeleteFileW(target.c_str());
+        BOOL ok = !ops[i].backup.empty() ? CopyFileW(ops[i].backup.c_str(), target.c_str(), FALSE)
+                                         : (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND);
+        if (ok && (ops[i].backup.empty() || Sha256File(target) == ops[i].oldSha)) continue;
+        LogLine("tx " + tx + ": UNDO FAILED for " + ops[i].path + ": " + Narrow(LastErrorText(GetLastError())) +
+                " (backup " + Narrow(ops[i].backup) + ")");
+        if (!failed++) first = Widen(ops[i].path);
     }
+    LogLine("tx " + tx + ": undo of " + std::to_string(applied) + " files, " + std::to_string(failed) + " failed");
+    if (!failed) return L" Původní soubory jsou vrácené.";
+    return L" POZOR: " + std::to_wstring(failed) + L" souborů se nepodařilo vrátit (první " + first + L"), zálohy zůstávají v " + TxDir(tx) +
+           L" a podrobnosti jsou v update.log.";
 }
 
+/// Checks every replaced file against its expected hash; logs each mismatch, bad = the first one and the count.
 bool VerifyTargets(const Config& cfg, const std::vector<Op>& ops, std::wstring& bad) {
+    size_t mismatches = 0;
     for (auto& o : ops) {
         std::wstring target = TargetPath(cfg, o.path);
-        bool ok = o.newSha.empty() ? !FileExists(target) : Sha256File(target) == o.newSha;
-        if (!ok) { bad = Widen(o.path); return false; }
+        std::string have = FileExists(target) ? Sha256File(target) : "";
+        if (have == o.newSha) continue;
+        LogLine("verify: " + o.path + " has " + (have.empty() ? std::string("no file") : have.substr(0, 16)) + ", expected " +
+                (o.newSha.empty() ? std::string("no file") : o.newSha.substr(0, 16)));
+        if (!mismatches++) bad = Widen(o.path);
     }
-    return true;
+    if (mismatches > 1) bad += L" a dalších " + std::to_wstring(mismatches - 1) + L" souborů";
+    return mismatches == 0;
 }
 
 void ClearBootFiles() {
-    for (const wchar_t* f : {L"plan.txt", L"rollback.txt", L"plan.done", L"rollback.done", L"plan.cancelled", L"trial", L"result.txt", L"rolledback"})
+    for (const wchar_t* f : {L"plan.txt", L"rollback.txt", L"plan.done", L"rollback.done", L"plan.cancelled", L"trial", L"result.txt",
+                             L"rolledback", L"plan.log", L"rollback.log"})
         DeleteFileW(BootFile(f).c_str());
+}
+
+/// Copies the lines luupboot.exe could not apply (UTF-16 plan.log / rollback.log) into update.log.
+void LogBootFailures() {
+    for (const wchar_t* f : {L"plan.log", L"rollback.log"}) {
+        std::vector<uint8_t> raw;
+        if (!ReadFileBytes(BootFile(f), raw) || raw.size() < 4) continue;
+        std::wstring text(reinterpret_cast<const wchar_t*>(raw.data()) + 1, (raw.size() - 2) / sizeof(wchar_t));
+        size_t pos = 0, next;
+        while ((next = text.find(L'\n', pos)) != std::wstring::npos) {
+            LogLine("luupboot " + Narrow(f) + ": " + Narrow(text.substr(pos, next - pos)));
+            pos = next + 1;
+        }
+    }
 }
 
 /// Writes the plan luupboot.exe applies at the next boot and the plan that undoes it. Paths are NT paths.
@@ -289,8 +360,10 @@ bool WriteBootPlans(const Config& cfg, const std::vector<Op>& ops, std::wstring&
 InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std::vector<Op>& ops, std::wstring& message,
                        const Progress& progress) {
     bool restart = false;
-    for (auto& o : ops)
-        if (InUse(TargetPath(cfg, o.path))) { restart = true; break; }
+    for (auto& o : ops) {
+        std::wstring t = TargetPath(cfg, o.path);
+        if (InUse(t) && !IsOwnFile(t)) { restart = true; break; }
+    }
     txj["mode"] = restart ? "restart" : "direct";
     SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
 
@@ -301,29 +374,49 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
         // luupboot cannot create folders, so they exist before the restart.
         if (!EnsureDirs(target, true)) {
             message = L"Nelze vytvořit složku pro " + Widen(o.path) + L": " + LastErrorText(GetLastError());
-            if (!restart) UndoDirect(cfg, ops, i);
+            LogLine("tx " + tx + ": " + Narrow(message));
+            if (!restart) message += UndoDirect(cfg, ops, i, tx);
             return InstallOutcome::Failed;
         }
         if (restart) continue;
+        // The running client: Windows lets a mapped exe be renamed, so it moves aside and the new one takes its name.
+        std::wstring aside;
+        if (!o.staged.empty() && IsOwnFile(target) && InUse(target)) {
+            aside = target + L".old-" + Widen(tx);
+            if (!MoveFileExW(target.c_str(), aside.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+                message = L"Nelze odsunout běžící " + Widen(o.path) + L": " + LastErrorText(GetLastError());
+                LogLine("tx " + tx + ": " + Narrow(message));
+                message += UndoDirect(cfg, ops, i, tx);
+                return InstallOutcome::Failed;
+            }
+            LogLine("tx " + tx + ": running " + o.path + " moved aside to " + Narrow(aside));
+        }
         BOOL ok = o.staged.empty() ? (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND)
                                    : MoveFileExW(o.staged.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
         if (!ok) {
             message = L"Nelze nahradit " + Widen(o.path) + L": " + LastErrorText(GetLastError());
-            UndoDirect(cfg, ops, i);
+            LogLine("tx " + tx + ": " + Narrow(message));
+            if (!aside.empty() && !MoveFileExW(aside.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING))
+                LogLine("tx " + tx + ": UNDO FAILED, running exe stays at " + Narrow(aside) + ": " + Narrow(LastErrorText(GetLastError())));
+            message += UndoDirect(cfg, ops, i, tx);
             return InstallOutcome::Failed;
         }
     }
     if (restart) {
-        if (g_dataOverride.empty() && !EnsureBootApplier(message)) return InstallOutcome::Failed;
-        if (!WriteBootPlans(cfg, ops, message)) return InstallOutcome::Failed;
+        // Nothing on disk has changed yet, so a failure here leaves the system as it was.
+        if ((g_dataOverride.empty() && !EnsureBootApplier(message)) || !WriteBootPlans(cfg, ops, message)) {
+            LogLine("tx " + tx + ": cannot schedule the restart-time update: " + Narrow(message));
+            return InstallOutcome::Failed;
+        }
         if (g_dataOverride.empty()) AddRecoveryEntry(cfg);
         return InstallOutcome::PendingRestart;
     }
 
     std::wstring bad;
     if (!VerifyTargets(cfg, ops, bad)) {
-        UndoDirect(cfg, ops, ops.size());
-        message = L"Kontrola po nahrazení selhala u " + bad + L"; původní soubory jsou vrácené.";
+        message = L"Kontrola po nahrazení selhala u " + bad + L"; vracím původní soubory.";
+        LogLine("tx " + tx + ": " + Narrow(message));
+        message += UndoDirect(cfg, ops, ops.size(), tx);
         return InstallOutcome::Failed;
     }
     return InstallOutcome::Installed;
@@ -460,8 +553,15 @@ Config LoadConfig() {
 #endif
     Config c{LNTU_FEED_URL, L"C:\\"};
     json j = LoadJson(JoinPath(DataDir(), L"config.json"), json::object());
-    if (j.contains("feedUrl")) c.feedUrl = Widen(j["feedUrl"].get<std::string>());
-    if (j.contains("root")) c.root = Widen(j["root"].get<std::string>());
+    try {
+        if (j.contains("feedUrl")) c.feedUrl = Widen(j["feedUrl"].get<std::string>());
+        if (j.contains("root")) c.root = Widen(j["root"].get<std::string>());
+        if (j.contains("auto")) c.autoMode = j["auto"].get<std::string>();
+        if (j.contains("checkMinutes")) c.checkMinutes = std::max(1, j["checkMinutes"].get<int>());
+        if (j.contains("restartHour")) c.restartHour = j["restartHour"].get<int>();
+    } catch (const json::exception& e) {
+        LogLine(std::string("config.json: ") + e.what() + "; the remaining settings keep their defaults");
+    }
     if (!c.feedUrl.empty() && c.feedUrl.back() != L'/') c.feedUrl += L'/';
     return c;
 }
@@ -604,6 +704,7 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
         const std::string& have = local[key];
         const std::string& want = wanted[key];
         if (have == want) continue;
+        if (have.empty() && key.rfind("bootpartition/", 0) == 0) continue;  // loaders are only replaced, never added
         if (have.empty() && (!haveBase || basePaths.count(key))) continue;  // left out by Setup, not new in this release
         uint64_t size = f.value("size", (uint64_t)0);
         if (want != f.value("sha256", ""))
@@ -676,6 +777,7 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
     std::vector<uint8_t> raw;
     std::string bootResult = ReadFileBytes(BootFile(L"result.txt"), raw) ? Trim(std::string(raw.begin(), raw.end())) : "";
     if (!bootResult.empty()) LogLine("luupboot: " + bootResult);
+    LogBootFailures();
 
     auto finish = [&](const char* txState, const char* result, const std::wstring& text, const std::string& installed) {
         state["installed"] = installed;
@@ -771,6 +873,66 @@ bool EnsureFinalizeService(std::wstring& error) {
         CloseServiceHandle(svc);
     }
     CloseServiceHandle(scm);
+    return ok;
+}
+
+Status LoadStatus() {
+    json j = LoadJson(JoinPath(DataDir(), L"status.json"), json::object());
+    Status s;
+    s.checked = j.value("checked", "");
+    s.latest = j.value("latest", "");
+    s.error = j.value("error", "");
+    s.changes = j.value("changes", 0);
+    return s;
+}
+
+void RunAutomatic(void* stopEvent) {
+    std::wstring statusPath = JoinPath(DataDir(), L"status.json");
+    for (;;) {
+        Config cfg = LoadConfig();
+        json st = LoadJson(statusPath, json::object());
+        long long now = (long long)time(nullptr), last = st.value("checkedEpoch", 0LL);
+        if (cfg.autoMode != "off" && PendingTransaction().empty() && now - last >= cfg.checkMinutes * 60LL) {
+            CheckResult c;
+            std::wstring err, msg;
+            bool ok = CheckForUpdate(cfg, c, err, nullptr);
+            st = json{{"checkedEpoch", now}, {"checked", NowIso()}, {"latest", c.latest.id}, {"changes", ok ? (int)c.changes.size() : 0},
+                      {"error", Narrow(err)}};
+            if (ok && !c.changes.empty() && cfg.autoMode == "install") {
+                InstallOutcome r = InstallUpdate(cfg, c, msg, nullptr);
+                LogLine("auto install " + c.latest.id + ": " + Narrow(msg));
+                if (r == InstallOutcome::Installed) st["changes"] = 0;
+                if (r == InstallOutcome::Failed) st["error"] = Narrow(msg);
+            }
+            SaveJson(statusPath, st);
+        }
+        if (!PendingTransaction().empty() && cfg.restartHour >= 0) {
+            SYSTEMTIME t;
+            GetLocalTime(&t);
+            std::wstring err;
+            if (t.wHour == cfg.restartHour) {
+                LogLine("auto restart for pending update " + PendingTransaction());
+                if (!RestartSystem(err)) LogLine("auto restart: " + Narrow(err));
+            }
+        }
+        if (WaitForSingleObject((HANDLE)stopEvent, 60 * 1000) == WAIT_OBJECT_0) return;
+    }
+}
+
+bool RegisterAutomatic(std::wstring& error) {
+    if (!EnsureFinalizeService(error)) return false;
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    std::wstring cmd = L"\"" + std::wstring(exe) + L"\" /tray";
+    HKEY key;
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, nullptr, 0, KEY_SET_VALUE, nullptr, &key,
+                        nullptr) != ERROR_SUCCESS) {
+        error = L"Nelze otevřít klíč Run v registru.";
+        return false;
+    }
+    bool ok = RegSetValueExW(key, L"LiberNTUpdate", 0, REG_SZ, (const BYTE*)cmd.c_str(), (DWORD)((cmd.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    if (!ok) error = L"Nelze zapsat spuštění ikony do klíče Run.";
     return ok;
 }
 

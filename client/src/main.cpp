@@ -10,11 +10,13 @@
 #include "util.h"
 
 int RunGui(HINSTANCE inst);
+int RunTray(HINSTANCE inst);
 
 namespace {
 
 SERVICE_STATUS_HANDLE g_status;
 SERVICE_STATUS g_svc{SERVICE_WIN32_OWN_PROCESS};
+HANDLE g_stop;
 
 /// Writes to the console or pipe the program was started from, and to %ProgramData%\LiberNTUpdate\cli-output.txt
 /// (a GUI-subsystem program started by cmd.exe gets no pipe, so the file is what scripts read).
@@ -37,21 +39,26 @@ void Out(const std::wstring& text) {
 void ReportService(DWORD state, DWORD exitCode = NO_ERROR) {
     g_svc.dwCurrentState = state;
     g_svc.dwWin32ExitCode = exitCode;
-    g_svc.dwControlsAccepted = state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP : 0;
+    g_svc.dwControlsAccepted = state == SERVICE_RUNNING ? SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN : 0;
     SetServiceStatus(g_status, &g_svc);
 }
 
 DWORD WINAPI ServiceControl(DWORD control, DWORD, void*, void*) {
-    if (control == SERVICE_CONTROL_STOP) ReportService(SERVICE_STOP_PENDING);
+    if (control == SERVICE_CONTROL_STOP || control == SERVICE_CONTROL_SHUTDOWN) {
+        ReportService(SERVICE_STOP_PENDING);
+        SetEvent(g_stop);
+    }
     return NO_ERROR;
 }
 
-/// Boot-time job: finish or roll back a pending update, then stop.
+/// At boot: finish or roll back a pending update; then check and install updates until the service stops.
 void WINAPI ServiceMain(DWORD, LPWSTR*) {
     g_status = RegisterServiceCtrlHandlerExW(L"LiberNTUpdate", ServiceControl, nullptr);
+    g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     ReportService(SERVICE_RUNNING);
     std::wstring msg;
     if (FinalizePending(LoadConfig(), msg)) LogLine("service: " + Narrow(msg));
+    RunAutomatic(g_stop);
     ReportService(SERVICE_STOPPED);
 }
 
@@ -64,6 +71,9 @@ std::wstring Usage() {
            L"LiberNTUpdate.exe /finalize       finish a pending update (the service does this at boot)\r\n"
            L"LiberNTUpdate.exe /history        list past updates\r\n"
            L"LiberNTUpdate.exe /restart        restart the computer\r\n"
+           L"LiberNTUpdate.exe /register       enable automatic updates (service and tray icon)\r\n"
+           L"LiberNTUpdate.exe /status         result of the last automatic check\r\n"
+           L"LiberNTUpdate.exe /tray           tray icon that announces updates (started at logon)\r\n"
            L"LiberNTUpdate.exe /selftest       built-in checks";
 }
 
@@ -126,6 +136,19 @@ int Cli(const std::wstring& cmd) {
             Out(Widen(h.started + "  " + h.kind + "  " + h.release + "  " + h.result + "  " + std::to_string(h.files) + " files  " + h.message));
         return 0;
     }
+    if (cmd == L"/register") {
+        std::wstring err;
+        if (!RegisterAutomatic(err)) { Out(L"ERROR " + err); return 5; }
+        Out(L"automatic updates: service LiberNTUpdate and the tray icon are registered (auto=" + Widen(cfg.autoMode) +
+            L", every " + std::to_wstring(cfg.checkMinutes) + L" min, restart hour " + std::to_wstring(cfg.restartHour) + L")");
+        return 0;
+    }
+    if (cmd == L"/status") {
+        Status s = LoadStatus();
+        Out(L"checked: " + Widen(s.checked) + L"\r\nlatest:  " + Widen(s.latest) + L"\r\nchanges: " + std::to_wstring(s.changes) +
+            L"\r\npending: " + Widen(PendingTransaction()) + (s.error.empty() ? L"" : L"\r\nerror:   " + Widen(s.error)));
+        return 0;
+    }
     if (cmd == L"/restart") {
         std::wstring err;
         if (RestartSystem(err)) return 0;
@@ -147,6 +170,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
         SERVICE_TABLE_ENTRYW table[] = {{const_cast<LPWSTR>(L"LiberNTUpdate"), ServiceMain}, {nullptr, nullptr}};
         return StartServiceCtrlDispatcherW(table) ? 0 : 1;
     }
+    if (cmd == L"/tray") return RunTray(inst);
     if (!cmd.empty()) return Cli(cmd);
     return RunGui(inst);
 }

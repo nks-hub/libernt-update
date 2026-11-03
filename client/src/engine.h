@@ -10,8 +10,25 @@ std::wstring DataDir();
 struct Config {
     std::wstring feedUrl;  ///< ends with '/'
     std::wstring root;     ///< system drive the manifest paths are relative to, e.g. C:\ .
+    std::string autoMode = "install";  ///< service: "install" (check and install), "notify" (check only), "off"
+    int checkMinutes = 360;            ///< how often the service checks the feed
+    int restartHour = 3;               ///< local hour for the automatic restart of a pending update; -1 = never
 };
 Config LoadConfig();
+
+/// Service loop: checks the feed every checkMinutes, installs when autoMode is "install", restarts a pending update
+/// at restartHour, and writes %ProgramData%\LiberNTUpdate\status.json for the tray icon. Returns when stop is set.
+void RunAutomatic(void* stopEvent);
+
+/// What the last automatic check found (read by the tray icon).
+struct Status {
+    std::string checked, latest, error;
+    int changes = 0;
+};
+Status LoadStatus();
+
+/// Registers the boot-time service and the tray icon (HKLM Run) for automatic updates.
+bool RegisterAutomatic(std::wstring& error);
 
 struct Change {
     std::string path;    ///< manifest path, forward slashes, relative to the root

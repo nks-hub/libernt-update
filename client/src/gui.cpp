@@ -1,6 +1,8 @@
 // Main window: current and offered release, the files that would change, progress and the update history.
+// Tray icon (/tray): announces an update the service found or installed and offers the restart.
 #include <windows.h>
 #include <commctrl.h>
+#include <shellapi.h>
 
 #include <memory>
 #include <thread>
@@ -292,5 +294,129 @@ int RunGui(HINSTANCE inst) {
             DispatchMessageW(&m);
         }
     }
+    return 0;
+}
+
+namespace {
+
+enum : UINT { WmTray = WM_APP + 10 };
+enum : int { IdOpen = 201, IdRestartNow, IdHide };
+UINT g_taskbarCreated;
+NOTIFYICONDATAW g_nid;
+bool g_iconShown = false;
+std::string g_announced, g_hiddenFor;  // what the last balloon was about; what the user hid the icon for
+
+void OpenMainWindow() {
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    ShellExecuteW(nullptr, L"open", exe, nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+/// Shows, updates or removes the icon according to the pending update and the last automatic check.
+void RefreshTray(HWND w) {
+    std::string pending = PendingTransaction();
+    Status s = LoadStatus();
+    std::string about = !pending.empty() ? "pending:" + pending : s.changes > 0 ? "available:" + s.latest : "";
+    if (about.empty() || about == g_hiddenFor) {
+        if (g_iconShown) Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        g_iconShown = false;
+        return;
+    }
+    Config cfg = LoadConfig();
+    std::wstring tip, title, text;
+    if (!pending.empty()) {
+        tip = L"LiberNT Update: aktualizace čeká na restart";
+        title = L"Aktualizace je připravená";
+        text = L"Dokončí se při příštím restartu";
+        text += cfg.restartHour >= 0 ? L" (automaticky v " + std::to_wstring(cfg.restartHour) + L":00)." : L".";
+    } else {
+        tip = L"LiberNT Update: k dispozici je " + Widen(s.latest);
+        title = L"Je k dispozici aktualizace LiberNT";
+        text = L"Vydání " + Widen(s.latest) + L" mění " + std::to_wstring(s.changes) + L" souborů. Klepnutím otevřete LiberNT Update.";
+    }
+    g_nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE;
+    wcsncpy_s(g_nid.szTip, tip.c_str(), _TRUNCATE);
+    if (about != g_announced) {
+        g_nid.uFlags |= NIF_INFO;
+        wcsncpy_s(g_nid.szInfoTitle, title.c_str(), _TRUNCATE);
+        wcsncpy_s(g_nid.szInfo, text.c_str(), _TRUNCATE);
+        g_nid.dwInfoFlags = NIIF_INFO;
+        g_announced = about;
+    }
+    Shell_NotifyIconW(g_iconShown ? NIM_MODIFY : NIM_ADD, &g_nid);
+    g_iconShown = true;
+}
+
+LRESULT CALLBACK TrayProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == g_taskbarCreated) {  // Explorer restarted: the icon has to be added again.
+        g_iconShown = false;
+        g_announced.clear();
+        RefreshTray(w);
+        return 0;
+    }
+    switch (msg) {
+        case WM_TIMER:
+            RefreshTray(w);
+            return 0;
+        case WmTray:
+            if (lp == WM_LBUTTONUP || lp == WM_LBUTTONDBLCLK || lp == NIN_BALLOONUSERCLICK) {
+                OpenMainWindow();
+            } else if (lp == WM_RBUTTONUP || lp == WM_CONTEXTMENU) {
+                HMENU m = CreatePopupMenu();
+                AppendMenuW(m, MF_STRING, IdOpen, L"Otevřít LiberNT Update");
+                if (!PendingTransaction().empty()) AppendMenuW(m, MF_STRING, IdRestartNow, L"Restartovat a dokončit aktualizaci");
+                AppendMenuW(m, MF_STRING, IdHide, L"Skrýt ikonu");
+                POINT p;
+                GetCursorPos(&p);
+                SetForegroundWindow(w);
+                TrackPopupMenu(m, TPM_RIGHTBUTTON, p.x, p.y, 0, w, nullptr);
+                DestroyMenu(m);
+            }
+            return 0;
+        case WM_COMMAND:
+            if (LOWORD(wp) == IdOpen) {
+                OpenMainWindow();
+            } else if (LOWORD(wp) == IdRestartNow) {
+                std::wstring err;
+                if (!RestartSystem(err)) MessageBoxW(nullptr, err.c_str(), L"LiberNT Update", MB_ICONERROR);
+            } else if (LOWORD(wp) == IdHide) {
+                g_hiddenFor = g_announced;
+                RefreshTray(w);
+            }
+            return 0;
+        case WM_DESTROY:
+            if (g_iconShown) Shell_NotifyIconW(NIM_DELETE, &g_nid);
+            PostQuitMessage(0);
+            return 0;
+    }
+    return DefWindowProcW(w, msg, wp, lp);
+}
+
+}  // namespace
+
+int RunTray(HINSTANCE inst) {
+    HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\LiberNTUpdateTray");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+    WNDCLASSEXW wc{sizeof wc};
+    wc.lpfnWndProc = TrayProc;
+    wc.hInstance = inst;
+    wc.lpszClassName = L"LiberNTUpdateTray";
+    RegisterClassExW(&wc);
+    HWND w = CreateWindowExW(0, wc.lpszClassName, L"LiberNT Update", 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
+    // The V2 size works with shells that predate the Vista fields of NOTIFYICONDATAW.
+    g_nid.cbSize = NOTIFYICONDATAW_V2_SIZE;
+    g_nid.hWnd = w;
+    g_nid.uID = 1;
+    g_nid.uCallbackMessage = WmTray;
+    g_nid.hIcon = LoadIconW(nullptr, IDI_INFORMATION);
+    RefreshTray(w);
+    SetTimer(w, 1, 30 * 1000, nullptr);
+    MSG m;
+    while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+    }
+    CloseHandle(single);
     return 0;
 }
