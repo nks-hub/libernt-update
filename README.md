@@ -54,6 +54,10 @@ The client self-test covers SHA-256 and Ed25519 vectors, direct install, rollbac
 - Registry changes of a new build (new drivers or services in `hivesys.inf`) are not applied.
 - The EFI partition (boot manager, `BCD`) is not updated.
 - A build that does not boot cannot be rolled back from inside the system; take a VM snapshot first.
+- Kernels before LiberNT commit `4691c52` (`fix: mark every hive block a dirty registry cell spans`) write only
+  the first 4 KB block of a large registry value to disk, so a `PendingFileRenameOperations` list of several hundred
+  files reaches the next boot mixed with older entries and only part of the update lands. On such a system copy the
+  new `ntkrnlmp.exe` (or `ntoskrnl.exe` on single-CPU machines) over `system32\ntoskrnl.exe`, restart, then update.
 
 ## License
 

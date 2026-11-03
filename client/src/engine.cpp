@@ -292,6 +292,7 @@ void FinishHistory(json h, const std::string& result, const std::wstring& messag
 /// Runs a prepared transaction to its end and records the outcome in state and history.
 InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::vector<Op>& ops, json hist,
                      const std::string& releaseAfter, std::wstring& message, const Progress& progress) {
+    message.clear();
     InstallOutcome r = ApplyTx(cfg, tx, txj, ops, message, progress);
     json state = LoadState();
     if (r == InstallOutcome::Installed) {
@@ -332,6 +333,10 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
         o.path = old[i].path;
         o.oldSha = old[i].newSha;
         o.newSha = old[i].oldSha;
+        std::wstring target = TargetPath(cfg, o.path);
+        bool exists = FileExists(target);
+        // Files the update never reached are already as they were; touching them again only adds risk.
+        if (exists ? Sha256File(target) == o.newSha : o.newSha.empty()) continue;
         if (!old[i].backup.empty()) {
             // Restart-time moves consume their source, so restore from a copy and keep the original backup.
             o.staged = JoinPath(dir, L"new\\" + std::to_wstring(i) + L".bin");
@@ -341,8 +346,7 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
                 return InstallOutcome::Failed;
             }
         }
-        std::wstring target = TargetPath(cfg, o.path);
-        if (FileExists(target)) {
+        if (exists) {
             o.backup = JoinPath(dir, L"backup\\" + std::to_wstring(i) + L".bin");
             if (!EnsureDirs(o.backup, true) || !CopyFileW(target.c_str(), o.backup.c_str(), FALSE)) {
                 message = L"Nelze zálohovat " + Widen(o.path) + L": " + LastErrorText(GetLastError());
@@ -728,6 +732,15 @@ bool SelfTest(std::wstring& report) {
     check(ReadFileBytes(JoinPath(root, L"Windows\\system32\\old.dll"), b) && std::string(b.begin(), b.end()) == "old",
           L"rollback restored the old file");
     check(!FileExists(JoinPath(root, L"Windows\\system32\\added.dll")), L"rollback removed the added file");
+
+    // An update that reached only some files: the rollback restores just those.
+    r = InstallUpdate(cfg, c, msg, nullptr);
+    check(r == InstallOutcome::Installed, L"second install: " + msg);
+    put(JoinPath(root, L"Windows\\system32\\old.dll"), "old");
+    r = RollbackLast(cfg, msg, nullptr);
+    check(r == InstallOutcome::Installed && msg == L"1 souborů nahrazeno." &&
+              !FileExists(JoinPath(root, L"Windows\\system32\\added.dll")),
+          L"partial update: rollback touches only the changed file: " + msg);
 
     // A file in use forces the restart path; without admin rights scheduling fails cleanly instead.
     HANDLE lock = CreateFileW(JoinPath(root, L"Windows\\system32\\keep.dll").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
