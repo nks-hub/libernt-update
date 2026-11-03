@@ -9,6 +9,10 @@
 
 Updates an installed [LiberNT](https://github.com/nks-hub/LiberNT) system to a newer build file by file, with backups and rollback, instead of reinstalling it.
 
+![Update window](docs/images/update-available.png)
+
+[Architecture](docs/ARCHITECTURE.md) · [Operations](docs/OPERATIONS.md) · [Screenshots of an update from upstream](docs/SCREENSHOTS.md)
+
 `server/luup.py` runs on the build machine: it reads `LiberNT.img` (`ninja liberntimg`), hashes the serviced files and publishes a signed release. `client/` builds `LiberNTUpdate.exe` (Win32, C++17, static CRT), which runs inside LiberNT, and `luupboot.exe`, a native program that replaces files at boot. The client's user interface is in Czech.
 
 ## Features
@@ -22,6 +26,7 @@ Updates an installed [LiberNT](https://github.com/nks-hub/LiberNT) system to a n
 - 🔄 **Automatic updates** - the service checks the feed (every 6 hours by default), installs what it finds and restarts at 3:00 when an update waits for a restart. A tray icon announces updates and offers the restart.
 - 🆙 **Self-update** - every release carries the newest client from GitHub releases. The running client is renamed aside and replaced without a restart; its previous exe restarts the service and rolls the update back when the new client does not keep running for 30 seconds.
 - 🥾 **Boot loaders** - `freeldr.sys`, `rosload.exe`, `bootx64.efi` and `bootmgfw.efi` from the image's boot partition replace the installed ones (system drive root on BIOS installs, EFI system partition on UEFI); `BCD` is never touched.
+- 📦 **Only real changes** - a file that differs from the previous release only in build metadata (PE time stamps, checksum, debug ids, build tag) keeps its previous contents, and a build that changes nothing real is not published; an upstream merge of 30 commits went from 1520 changed files to 516.
 - 🚫 **No retry loops** - a release that failed or was rolled back on a machine is not installed again automatically; the window or `/install` retries it.
 - 📝 **Logging** - every step, every failed file, every undo and every line `luupboot.exe` could not apply goes to `%ProgramData%\LiberNTUpdate\update.log`.
 - ⏪ **History** - each update keeps a backup of the files it replaced; the last update can be undone, a pending one cancelled, and every transaction is listed.
