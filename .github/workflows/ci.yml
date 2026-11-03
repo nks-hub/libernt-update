@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  publisher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y python3-nacl p7zip-full
+      - run: python3 server/luup.py test
+
+  client:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: client\build.cmd
+        shell: cmd
+      - name: Self-test
+        shell: pwsh
+        run: |
+          # GUI-subsystem exe: it writes the report to cli-output.txt instead of the console.
+          $p = Start-Process -FilePath client\out\LiberNTUpdate.exe -ArgumentList '/selftest' -Wait -PassThru
+          Get-Content "$env:ProgramData\LiberNTUpdate\cli-output.txt"
+          exit $p.ExitCode

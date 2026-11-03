@@ -173,6 +173,16 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
             os.replace(tmp, obj)
             stored += 1
 
+    changed = None
+    if previous:
+        old = json.loads((feed_dir / previous["manifest"]).read_text("utf-8"))
+        old_map = {e["path"].lower(): e["sha256"] for e in old["files"]}
+        new_paths = {f["path"].lower() for f in files}
+        changed = sum(1 for f in files if old_map.get(f["path"].lower()) != f["sha256"])
+        if not changed and new_paths == set(old_map):
+            print(f"nothing to publish: commit {commit[:10]} builds the same files as {previous['id']}")
+            return previous
+
     release_id = now.strftime("%Y%m%d-%H%M%S") + "-" + commit[:10]
     manifest = {
         "id": release_id,
@@ -183,11 +193,6 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
     }
     manifest_raw = write_json(feed_dir / "releases" / release_id / "manifest.json", manifest)
 
-    changed = None
-    if previous:
-        old = json.loads((feed_dir / previous["manifest"]).read_text("utf-8"))
-        old_map = {e["path"].lower(): e["sha256"] for e in old["files"]}
-        changed = sum(1 for f in files if old_map.get(f["path"].lower()) != f["sha256"])
     entry = {
         "id": release_id,
         "commit": commit,
@@ -253,6 +258,9 @@ def self_test() -> int:
         (tree / "Windows/system32/new.dll").write_bytes(b"new")
         e2 = publish_tree(tree, feed, key, "b" * 40, now=t0 + dt.timedelta(hours=1))
         assert e2["files"] == 4 and e2["changedFromPrevious"] == 2, e2
+        e3 = publish_tree(tree, feed, key, "c" * 40, now=t0 + dt.timedelta(hours=2))
+        assert e3 is e2 or e3["id"] == e2["id"], "a commit with identical files must not become a release"
+        assert len(json.loads((feed / "feed.json").read_text("utf-8"))["releases"]) == 2
         assert len(list((feed / "objects").rglob("*"))) - len(list((feed / "objects").iterdir())) == 5
         assert verify_feed(feed, pub) == 0
         (feed / "feed.json").write_bytes((feed / "feed.json").read_bytes().replace(b"LiberNT", b"Evil"))

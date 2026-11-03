@@ -1,0 +1,9 @@
+[Unit]
+Description=Build LiberNT from nks-hub/LiberNT (nks) and publish an update release
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/luup/build-release.sh
+Nice=10

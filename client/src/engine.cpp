@@ -378,7 +378,10 @@ std::wstring DataDir() {
 }
 
 Config LoadConfig() {
-    Config c{L"http://updates.example.org/", L"C:\\"};
+#ifndef LNTU_FEED_URL
+#define LNTU_FEED_URL L""
+#endif
+    Config c{LNTU_FEED_URL, L"C:\\"};
     json j = LoadJson(JoinPath(DataDir(), L"config.json"), json::object());
     if (j.contains("feedUrl")) c.feedUrl = Widen(j["feedUrl"].get<std::string>());
     if (j.contains("root")) c.root = Widen(j["root"].get<std::string>());
@@ -412,6 +415,10 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
     out = CheckResult{};
     out.installed = InstalledRelease();
     out.pendingTx = PendingTransaction();
+    if (cfg.feedUrl.empty()) {
+        error = L"Není nastavená adresa aktualizací: doplň \"feedUrl\" do " + JoinPath(DataDir(), L"config.json") + L".";
+        return false;
+    }
     if (progress) progress(2, L"Stahuji seznam vydání…");
     std::vector<uint8_t> feedRaw, sigRaw, manRaw;
     if (!Fetch(cfg, "feed.json", feedRaw, error) || !Fetch(cfg, "feed.json.sig", sigRaw, error)) return false;
