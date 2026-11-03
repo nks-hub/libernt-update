@@ -33,7 +33,7 @@ bool RegisterAutomatic(std::wstring& error);
 /// Client version, set at build time (LNTU_VERSION), "dev" for local builds.
 const char* ClientVersion();
 
-/// Service start, before anything else: copies the running exe to %ProgramData%\LiberNTUpdate\watchdog.exe, which
+/// Service start, before anything else: copies the running exe to %ProgramData%\LiberNTUpdate\watchdog\<hash>.exe, which
 /// supervises a later self-update with code known to work.
 void SnapshotRunningClient();
 

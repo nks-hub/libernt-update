@@ -906,14 +906,30 @@ Status LoadStatus() {
 #endif
 const char* ClientVersion() { return LNTU_VERSION; }
 
-std::wstring WatchdogExe() { return JoinPath(DataDir(), L"watchdog.exe"); }
+std::wstring g_watchdogExe;  // snapshot of the running client, see SnapshotRunningClient
+
+std::wstring WatchdogExe() { return g_watchdogExe; }
 
 void SnapshotRunningClient() {
-    // Called first thing at service start, while the exe on disk is still the image this process runs.
-    std::wstring exe = WatchdogExe();
+    // Called first thing at service start, while the exe on disk is still the image this process runs. The name
+    // carries the hash, so a watchdog still running from an older snapshot never blocks the copy.
+    std::wstring dir = JoinPath(DataDir(), L"watchdog");
+    std::string sha = Sha256File(OwnExe());
+    std::wstring exe = JoinPath(dir, Widen(sha.substr(0, 16)) + L".exe");
     EnsureDirs(exe, true);
-    if (!CopyFileW(OwnExe().c_str(), exe.c_str(), FALSE))
+    if (Sha256File(exe) != sha && !CopyFileW(OwnExe().c_str(), exe.c_str(), FALSE)) {
         LogLine("service: cannot copy the running client to " + Narrow(exe) + ": " + Narrow(LastErrorText(GetLastError())));
+        return;
+    }
+    g_watchdogExe = exe;
+    WIN32_FIND_DATAW fd;
+    HANDLE f = FindFirstFileW(JoinPath(dir, L"*.exe").c_str(), &fd);
+    if (f == INVALID_HANDLE_VALUE) return;
+    do {
+        std::wstring p = JoinPath(dir, fd.cFileName);
+        if (_wcsicmp(p.c_str(), exe.c_str()) != 0) DeleteFileW(p.c_str());  // one still running stays until next time
+    } while (FindNextFileW(f, &fd));
+    FindClose(f);
 }
 
 void ServiceHousekeeping() {
@@ -980,7 +996,8 @@ bool StartSelfUpdateWatchdog(const std::string& tx) {
     std::wstring cmd = L"\"" + exe + L"\" /watch-self-update " + Widen(tx);
     STARTUPINFOW si{sizeof si};
     PROCESS_INFORMATION pi{};
-    if (!FileExists(exe) || !CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
+    if (exe.empty() || !FileExists(exe) ||
+        !CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
         LogLine("self-update: cannot start the watchdog " + Narrow(exe) + ": " + Narrow(LastErrorText(GetLastError())));
         return false;
     }
