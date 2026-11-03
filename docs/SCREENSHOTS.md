@@ -1,6 +1,20 @@
+# Screenshots
+
+The client follows the Windows UI language: Czech on a Czech system, English elsewhere (`"language"` in `config.json` overrides it). Dialog buttons come from Windows itself, so they stay in the system language.
+
+## English interface
+
+![Update offered](images/update-available-en.png)
+
+A client update is offered: one file changes. The buttons work from the keyboard (Alt+C, I, U, R).
+
+![Install confirmation](images/install-confirm-en.png)
+
+Installing asks first; the current files are backed up before anything is replaced.
+
 # An update from upstream changes
 
-Recorded on 3 November 2026 on a LiberNT amd64 VM (BIOS, 2 CPUs) running client v0.2.4. The fork's `Sync upstream` workflow merged 30 upstream commits (up to `0a41bd8`, 65 changed source files) into `nks` as `cd663698bd`; `build-release.sh` built the image and published release `20261103-172154-cd663698bd`.
+The rest of this page shows a Czech system. Recorded on 3 November 2026 on a LiberNT amd64 VM (BIOS, 2 CPUs) running client v0.2.4. The fork's `Sync upstream` workflow merged 30 upstream commits (up to `0a41bd8`, 65 changed source files) into `nks` as `cd663698bd`; `build-release.sh` built the image and published release `20261103-172154-cd663698bd`.
 
 ## 1. The update is offered
 

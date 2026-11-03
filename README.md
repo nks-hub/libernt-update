@@ -9,7 +9,7 @@
 
 Updates an installed [LiberNT](https://github.com/nks-hub/LiberNT) system to a newer build file by file, with backups and rollback, instead of reinstalling it.
 
-![Update window](docs/images/update-available.png)
+![Update window](docs/images/update-available-en.png)
 
 [Architecture](docs/ARCHITECTURE.md) · [Operations](docs/OPERATIONS.md) · [Screenshots of an update from upstream](docs/SCREENSHOTS.md)
 
