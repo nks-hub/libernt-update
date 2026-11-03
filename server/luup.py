@@ -33,6 +33,10 @@ import nacl.signing
 
 # Only these trees of the system partition are serviced; everything else is user or machine state.
 INCLUDE_ROOTS = ("Windows/", "Program Files/", "Program Files (x86)/")
+# Boot partition of the image (FAT, the EFI system partition) unpacked under this name. Only the loaders are
+# serviced: BCD is the machine's boot configuration and the rest are Raspberry Pi firmware files.
+BOOT_DIR = "BootPartition/"
+BOOT_FILES = ("freeldr.sys", "rosload.exe", "EFI/BOOT/bootx64.efi", "EFI/LiberNT/Boot/bootmgfw.efi")
 # Machine state that must never be overwritten by an update (registry hives, caches, logs, user-edited files).
 EXCLUDE_PREFIXES = (
     "Windows/system32/config/",
@@ -60,6 +64,8 @@ EXCLUDE_SUFFIXES = (".log", ".etl", ".pnf", ".tmp")
 def serviced(rel: str) -> bool:
     """Whether a path (relative to the system drive, forward slashes) belongs to an update."""
     low = rel.lower()
+    if low.startswith(BOOT_DIR.lower()):
+        return low[len(BOOT_DIR):] in {f.lower() for f in BOOT_FILES}
     if not any(low.startswith(r.lower()) for r in INCLUDE_ROOTS):
         return False
     if any(low.startswith(p.lower()) for p in EXCLUDE_PREFIXES):
@@ -103,6 +109,10 @@ def extract_image(img: Path, work: Path) -> Path:
     if not ntfs:
         raise SystemExit(f"{img}: no NTFS partition found")
     subprocess.run(["7z", "x", "-y", f"-o{tree}", str(ntfs[0])], check=True, stdout=subprocess.DEVNULL)
+    # The FAT boot partition comes out as 0.img (or *.fat, depending on the 7-Zip version).
+    boot = sorted(p for p in parts.iterdir() if p.suffix.lower() in (".img", ".fat"))
+    if boot:
+        subprocess.run(["7z", "x", "-y", f"-o{tree / BOOT_DIR.rstrip('/')}", str(boot[0])], check=True, stdout=subprocess.DEVNULL)
     return tree
 
 
@@ -234,6 +244,8 @@ def verify_feed(feed_dir: Path, pub_hex: str) -> int:
 
 def self_test() -> int:
     """Publish two synthetic releases and check diff, dedup, exclusions and signatures."""
+    assert serviced("BootPartition/freeldr.sys") and serviced("BootPartition/EFI/BOOT/bootx64.efi")
+    assert not serviced("BootPartition/EFI/LiberNT/Boot/BCD") and not serviced("BootPartition/config.txt")
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         key = nacl.signing.SigningKey.generate()
