@@ -43,8 +43,11 @@ if python3 -c 'import json,sys; sys.exit(0 if any(r["commit"] == sys.argv[2] and
     echo "commit $head with client $client is already published"
 else
     echo "building $head with client $client"
-    # version.cmake reads the commit at configure time only; without this the build tag keeps the old commit.
-    cmake -S "$SRC" -B "$OUT" > /dev/null
+    # version.cmake reads the commit at configure time only. Reconfigure when the commit changed, so the build tag
+    # names it; not otherwise, because the regenerated buildno.h relinks the kernel for a client-only release.
+    if ! grep -q "$head" "$OUT/sdk/include/reactos/buildno.h" 2>/dev/null; then
+        cmake -S "$SRC" -B "$OUT" > /dev/null
+    fi
     ninja -C "$OUT" -j"$(nproc)" liberntimg
     python3 "$LUUP" publish --key "$KEY" --feed "$FEED" --img "$OUT/LiberNT.img" --commit "$head" --repo "$SRC" --client "$client_dir"
     python3 "$LUUP" verify --feed "$FEED" --pub "$(cat "${KEY%.key}.pub")"

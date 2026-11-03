@@ -80,9 +80,10 @@ def serviced(rel: str) -> bool:
     return not any(part.startswith("$") for part in rel.split("/"))
 
 
-# Strings every build writes into its files: the build tag (20261103-nt10.0-044-1374-g320a592) and commit hashes.
-BUILD_TAG = re.compile(rb"20\d{6}-nt10\.0-\d{3}-\d{4}-g[0-9a-f]{7,12}")
-BUILD_TAG_UTF16 = re.compile(rb"2\x000\x00(?:\d\x00){6}-\x00n\x00t\x001\x000\x00\.\x000\x00-\x00(?:\d\x00){3}-\x00(?:\d\x00){4}-\x00g\x00(?:[0-9a-f]\x00){7,12}")
+# Strings every build writes into its files: the build tag (20261103-nt10.0-044-1374-g320a592, also without the
+# date) and commit hashes.
+BUILD_TAG = re.compile(rb"(?:20\d{6}-)?nt10\.0-\d{3}-\d{4}-g[0-9a-f]{7,12}")
+BUILD_TAG_UTF16 = re.compile(rb"(?:2\x000\x00(?:\d\x00){6}-\x00)?n\x00t\x001\x000\x00\.\x000\x00-\x00(?:\d\x00){3}-\x00(?:\d\x00){4}-\x00g\x00(?:[0-9a-f]\x00){7,12}")
 COMMIT_HASH = re.compile(rb"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
 
 
