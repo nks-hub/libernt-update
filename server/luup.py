@@ -37,6 +37,9 @@ INCLUDE_ROOTS = ("Windows/", "Program Files/", "Program Files (x86)/")
 # serviced: BCD is the machine's boot configuration and the rest are Raspberry Pi firmware files.
 BOOT_DIR = "BootPartition/"
 BOOT_FILES = ("freeldr.sys", "rosload.exe", "EFI/BOOT/bootx64.efi", "EFI/LiberNT/Boot/bootmgfw.efi")
+# The update client itself ships in every release (publish --client).
+CLIENT_DIR = "Program Files/LiberNT Update"
+CLIENT_FILES = ("LiberNTUpdate.exe", "luupboot.exe")
 # Machine state that must never be overwritten by an update (registry hives, caches, logs, user-edited files).
 EXCLUDE_PREFIXES = (
     "Windows/system32/config/",
@@ -161,8 +164,19 @@ def git_notes(repo: Path, old_commit: str | None, new_commit: str) -> list[str]:
     return r.stdout.splitlines()[:200] if r.returncode == 0 else []
 
 
+def add_client(tree: Path, client_dir: Path) -> str:
+    """Puts the client (LiberNTUpdate.exe, luupboot.exe) into the tree, so updates also update the updater.
+    client_dir is an unpacked client release; its VERSION file names the version."""
+    dest = tree / CLIENT_DIR
+    dest.mkdir(parents=True, exist_ok=True)
+    for name in CLIENT_FILES:
+        shutil.copyfile(client_dir / name, dest / name)
+    return (client_dir / "VERSION").read_text().strip()
+
+
 def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commit: str,
-                 repo: Path | None = None, notes: str | None = None, now: dt.datetime | None = None) -> dict:
+                 repo: Path | None = None, notes: str | None = None, now: dt.datetime | None = None,
+                 client: str | None = None) -> dict:
     now = now or dt.datetime.now(dt.timezone.utc)
     files = scan_tree(tree)
     if not files:
@@ -206,6 +220,7 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
     entry = {
         "id": release_id,
         "commit": commit,
+        "client": client,
         "date": manifest["date"],
         "manifest": f"releases/{release_id}/manifest.json",
         "manifestSha256": hashlib.sha256(manifest_raw).hexdigest(),
@@ -273,7 +288,17 @@ def self_test() -> int:
         e3 = publish_tree(tree, feed, key, "c" * 40, now=t0 + dt.timedelta(hours=2))
         assert e3 is e2 or e3["id"] == e2["id"], "a commit with identical files must not become a release"
         assert len(json.loads((feed / "feed.json").read_text("utf-8"))["releases"]) == 2
-        assert len(list((feed / "objects").rglob("*"))) - len(list((feed / "objects").iterdir())) == 5
+        cdir = tmp / "client"
+        cdir.mkdir()
+        for name in CLIENT_FILES:
+            (cdir / name).write_bytes(b"client " + name.encode())
+        (cdir / "VERSION").write_text("v9.9.9\n")
+        e4 = publish_tree(tree, feed, key, "c" * 40, now=t0 + dt.timedelta(hours=3), client=add_client(tree, cdir))
+        assert e4["client"] == "v9.9.9" and e4["changedFromPrevious"] == 2, e4
+        m4 = json.loads((feed / e4["manifest"]).read_text("utf-8"))
+        assert any(f["path"] == "Program Files/LiberNT Update/LiberNTUpdate.exe" for f in m4["files"])
+        # 5 contents from the first two releases plus the two client files
+        assert len(list((feed / "objects").rglob("*"))) - len(list((feed / "objects").iterdir())) == 7
         assert verify_feed(feed, pub) == 0
         (feed / "feed.json").write_bytes((feed / "feed.json").read_bytes().replace(b"LiberNT", b"Evil"))
         try:
@@ -299,6 +324,7 @@ def main() -> int:
     p.add_argument("--commit", required=True)
     p.add_argument("--repo", type=Path, help="source checkout, for release notes")
     p.add_argument("--notes")
+    p.add_argument("--client", type=Path, help="unpacked client release (LiberNTUpdate.exe, luupboot.exe, VERSION)")
     v = sub.add_parser("verify")
     v.add_argument("--feed", type=Path, required=True)
     v.add_argument("--pub", required=True)
@@ -317,10 +343,13 @@ def main() -> int:
         key = load_key(a.key)
         a.feed.mkdir(parents=True, exist_ok=True)
         if a.tree:
-            publish_tree(a.tree, a.feed, key, a.commit, a.repo, a.notes)
+            client = add_client(a.tree, a.client) if a.client else None
+            publish_tree(a.tree, a.feed, key, a.commit, a.repo, a.notes, client=client)
         else:
             with tempfile.TemporaryDirectory(dir=a.feed.parent) as work:
-                publish_tree(extract_image(a.img, Path(work)), a.feed, key, a.commit, a.repo, a.notes)
+                tree = extract_image(a.img, Path(work))
+                client = add_client(tree, a.client) if a.client else None
+                publish_tree(tree, a.feed, key, a.commit, a.repo, a.notes, client=client)
         return 0
     if a.cmd == "verify":
         return verify_feed(a.feed, a.pub)

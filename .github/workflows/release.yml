@@ -1,0 +1,41 @@
+name: Release client
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  client:
+    runs-on: windows-latest
+    env:
+      LNTU_VERSION: ${{ github.ref_name }}
+      LNTU_FEED_URL: http://libernt-update.nks-hub.cz/
+    steps:
+      - uses: actions/checkout@v4
+      - run: client\build.cmd
+        shell: cmd
+      - name: Self-test
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath client\out\LiberNTUpdate.exe -ArgumentList '/selftest' -Wait -PassThru
+          Get-Content "$env:ProgramData\LiberNTUpdate\cli-output.txt"
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+          $p = Start-Process -FilePath client\out\LiberNTUpdate.exe -ArgumentList '/version' -Wait -PassThru
+          $v = (Get-Content "$env:ProgramData\LiberNTUpdate\cli-output.txt").Trim()
+          if ($v -ne $env:LNTU_VERSION) { Write-Error "built version '$v' is not $env:LNTU_VERSION"; exit 1 }
+      - name: Checksums
+        shell: pwsh
+        working-directory: client/out
+        run: |
+          Get-FileHash LiberNTUpdate.exe, luupboot.exe -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content -Encoding ascii SHA256SUMS
+          Get-Content SHA256SUMS
+      - name: Publish the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" client/out/LiberNTUpdate.exe client/out/luupboot.exe client/out/SHA256SUMS --title "$GITHUB_REF_NAME" --notes "Client $GITHUB_REF_NAME. Build machines pick it up with server/build-release.sh."
