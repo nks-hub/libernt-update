@@ -4,6 +4,7 @@
  *     LUUP 1
  *     M<TAB>\??\C:\...\new\0.bin<TAB>\??\C:\Windows\explorer.exe     move, replacing the target
  *     D<TAB>\??\C:\Windows\old.dll                                     delete
+ *     G<TAB>\??\C:\...\desired.bin<TAB>\??\C:\...\expected.bin          guarded registry record
  * Lines end with LF; CR before LF is ignored. */
 #pragma once
 #include <windows.h>
@@ -45,6 +46,7 @@ NTSTATUS LuupDeleteFile(PCWSTR ntPath);
 NTSTATUS LuupRenameFile(PCWSTR fromNtPath, PCWSTR toNtPath, BOOLEAN replace);
 BOOLEAN LuupFileExists(PCWSTR ntPath);
 void LuupFree(PVOID p);
+PVOID LuupAlloc(SIZE_T size);
 
 #ifdef __cplusplus
 }

@@ -1,5 +1,6 @@
 /* Builds without the C runtime: only ntdll calls, no memset/memcpy from the CRT. */
 #include "bootplan.h"
+#include "regplan.h"
 
 #define LUUP_FileBasicInformation ((FILE_INFORMATION_CLASS)4)
 #define LUUP_FileStandardInformation ((FILE_INFORMATION_CLASS)5)
@@ -65,6 +66,8 @@ static PVOID Alloc(SIZE_T size) {
     if (!NT_SUCCESS(NtAllocateVirtualMemory((HANDLE)-1, &p, 0, &size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE))) return NULL;
     return p;
 }
+
+PVOID LuupAlloc(SIZE_T size) { return Alloc(size); }
 
 void LuupFree(PVOID p) {
     SIZE_T size = 0;
@@ -413,6 +416,7 @@ NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result, PCWSTR logNtPath)
         a = NextField(&cur);
         b = NextField(&cur);
         if (op[0] == L'M' && !op[1] && a && b) st = LuupRenameFile(a, b, TRUE);
+        else if (op[0] == L'G' && !op[1] && a && b && !cur) st = LuupApplyRegistry(a, b);
         else if (op[0] == L'C' && !op[1] && a && b) st = LuupCopyFile(a, b);
         else if (op[0] == L'R' && !op[1] && a && b) {
             PWSTR expected = NextField(&cur);

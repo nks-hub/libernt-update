@@ -54,6 +54,8 @@ The active transaction is flushed to `state.json` before replacement starts. Rec
 
 smss runs `luupboot \??\C:\ProgramData\LiberNTUpdate` before any Win32 process and before `PendingFileRenameOperations`.
 
+The boot plan also supports `G` operations with desired and expected binary registry records. Keys must be created through explicit operations before writing their values; rollback removes only empty keys. A changed value is preserved unless it matches the recorded expectation. Registry changes, including retries that already see the desired state, must pass a hive flush before reporting success.
+
 | Found in `boot/` | luupboot does |
 |---|---|
 | `plan.txt` | applies it, renames it to `plan.done`, writes `trial` = 1 and `result.txt` / `plan.log` |
