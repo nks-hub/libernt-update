@@ -32,6 +32,7 @@ from pathlib import Path
 
 import nacl.encoding
 import nacl.signing
+from registry import export_registry, registry_bytes
 
 # Only these trees of the system partition are serviced; everything else is user or machine state.
 INCLUDE_ROOTS = ("Windows/", "Program Files/", "Program Files (x86)/")
@@ -244,7 +245,7 @@ def add_client(tree: Path, client_dir: Path) -> str:
 
 def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commit: str,
                  repo: Path | None = None, notes: str | None = None, now: dt.datetime | None = None,
-                 client: str | None = None) -> dict:
+                 client: str | None = None, registry: dict | None = None) -> dict:
     now = now or dt.datetime.now(dt.timezone.utc)
     files = scan_tree(tree)
     if not files:
@@ -252,6 +253,8 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
     feed_path = feed_dir / "feed.json"
     feed = json.loads(feed_path.read_text("utf-8")) if feed_path.exists() else {"product": "LiberNT", "format": 1, "releases": []}
     previous = feed["releases"][-1] if feed["releases"] else None
+    if previous and previous.get("registrySha256") and registry is None:
+        raise SystemExit("registry defaults are required after registry publishing has been enabled")
 
     # A file rebuilt from unchanged sources differs only in build metadata; it keeps the previous release's
     # contents, so clients neither download nor replace it.
@@ -282,6 +285,23 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
             os.replace(tmp, obj)
             stored += 1
 
+    registry_ref = None
+    if registry is not None:
+        raw = registry_bytes(registry)
+        if len(raw) > 16 * 1024 * 1024:
+            raise SystemExit("registry snapshot exceeds the 16 MiB client limit")
+        digest = hashlib.sha256(raw).hexdigest()
+        obj = feed_dir / "objects" / digest[:2] / digest
+        if not obj.exists():
+            obj.parent.mkdir(parents=True, exist_ok=True)
+            tmp = obj.with_suffix(".tmp")
+            tmp.write_bytes(raw)
+            os.replace(tmp, obj)
+            stored += 1
+        if sha256_file(obj) != digest:
+            raise SystemExit("registry snapshot object is corrupt")
+        registry_ref = {"sha256": digest, "size": len(raw), "format": 1}
+
     changed = None
     if previous:
         old = json.loads((feed_dir / previous["manifest"]).read_text("utf-8"))
@@ -289,7 +309,8 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
         new_paths = {f["path"].lower() for f in files}
         changed = sum(1 for f in files if old_map.get(f["path"].lower()) != f["sha256"])
         changed += len(set(old_map) - new_paths)
-        if not changed and new_paths == set(old_map):
+        registry_changed = (registry_ref or {}).get("sha256") != previous.get("registrySha256")
+        if not changed and new_paths == set(old_map) and not registry_changed:
             print(f"nothing to publish: commit {commit[:10]} builds the same files as {previous['id']}")
             return previous
 
@@ -301,6 +322,8 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
         "files": [{k: v for k, v in f.items() if not k.startswith("_")} for f in files],
         "aliases": variant_aliases(files),
     }
+    if registry_ref is not None:
+        manifest["registry"] = registry_ref
     manifest_raw = write_json(feed_dir / "releases" / release_id / "manifest.json", manifest)
 
     entry = {
@@ -316,6 +339,8 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
         "changedFromPrevious": changed,
         "notes": ([notes] if notes else []) + git_notes(repo, previous and previous["commit"], commit),
     }
+    if registry_ref is not None:
+        entry["registrySha256"] = registry_ref["sha256"]
     feed["releases"].append(entry)
     sign_feed(feed_dir, key, feed)
     print(f"published {release_id}: {len(files)} files, {stored} new objects, "
@@ -335,10 +360,19 @@ def verify_feed(feed_dir: Path, pub_hex: str) -> int:
             print(f"{rel['id']}: manifest hash mismatch")
             bad += 1
             continue
-        for f in json.loads(mraw)["files"]:
+        manifest = json.loads(mraw)
+        if rel.get("registrySha256") != manifest.get("registry", {}).get("sha256"):
+            print(f"{rel['id']}: registry snapshot reference mismatch")
+            bad += 1
+            continue
+        objects = manifest["files"] + ([manifest["registry"]] if "registry" in manifest else [])
+        for f in objects:
             obj = feed_dir / "objects" / f["sha256"][:2] / f["sha256"]
             if not obj.exists() or sha256_file(obj) != f["sha256"]:
-                print(f"{rel['id']}: object missing or corrupt for {f['path']}")
+                print(f"{rel['id']}: object missing or corrupt for {f.get('path', 'registry')}")
+                bad += 1
+            elif obj.stat().st_size != f["size"]:
+                print(f"{rel['id']}: object has an incorrect size for {f.get('path', 'registry')}")
                 bad += 1
     print(f"feed {'OK' if not bad else 'BROKEN'}: {len(feed['releases'])} releases, {bad} problems")
     return 1 if bad else 0
@@ -430,6 +464,30 @@ def self_test() -> int:
         e8 = publish_tree(tree, feed, key, "1" * 40, now=t0 + dt.timedelta(hours=7), client="v9.9.9")
         assert e8["changedFromPrevious"] == 1 and e8["sequence"] == e7["sequence"] + 1, e8
         assert verify_feed(feed, pub) == 0
+        registry = {"format": 1, "hives": {"SYSTEM": {"keys": ["CurrentControlSet\\Services\\DemoDriver"], "values": [
+            {"key": "CurrentControlSet\\Services\\DemoDriver", "name": "Start", "type": 4, "data": "00000000"}
+        ]}, "SOFTWARE": {"keys": [], "values": []}, "DEFAULT": {"keys": [], "values": []}}}
+        e9 = publish_tree(tree, feed, key, "1" * 40, now=t0 + dt.timedelta(hours=8), registry=registry)
+        assert e9["sequence"] == e8["sequence"] + 1 and e9["changedFromPrevious"] == 0
+        m9 = json.loads((feed / e9["manifest"]).read_text("utf-8"))
+        registry_sha = m9["registry"]["sha256"]
+        registry_obj = feed / "objects" / registry_sha[:2] / registry_sha
+        assert registry_sha == e9["registrySha256"] and json.loads(registry_obj.read_bytes()) == registry
+        e10 = publish_tree(tree, feed, key, "2" * 40, now=t0 + dt.timedelta(hours=9), registry=registry)
+        assert e10["id"] == e9["id"], "identical registry defaults must not create another release"
+        registry["hives"]["SYSTEM"]["values"][0]["data"] = "01000000"
+        e11 = publish_tree(tree, feed, key, "3" * 40, now=t0 + dt.timedelta(hours=10), registry=registry)
+        assert e11["registrySha256"] != registry_sha and e11["changedFromPrevious"] == 0
+        assert verify_feed(feed, pub) == 0
+        try:
+            publish_tree(tree, feed, key, "4" * 40, now=t0 + dt.timedelta(hours=11))
+            raise AssertionError("registry publishing silently disabled")
+        except SystemExit:
+            pass
+        registry_raw = registry_obj.read_bytes()
+        registry_obj.write_bytes(registry_raw + b" ")
+        assert verify_feed(feed, pub) == 1, "tampered registry snapshot accepted"
+        registry_obj.write_bytes(registry_raw)
         (feed / "feed.json").write_bytes((feed / "feed.json").read_bytes().replace(b"LiberNT", b"Evil"))
         try:
             verify_feed(feed, pub)
@@ -455,6 +513,7 @@ def main() -> int:
     p.add_argument("--repo", type=Path, help="source checkout, for release notes")
     p.add_argument("--notes")
     p.add_argument("--client", type=Path, help="unpacked client release (LiberNTUpdate.exe, luupboot.exe, VERSION)")
+    p.add_argument("--registry", action="store_true", help="include factory registry defaults (requires python3-hivex)")
     v = sub.add_parser("verify")
     v.add_argument("--feed", type=Path, required=True)
     v.add_argument("--pub", required=True)
@@ -466,6 +525,8 @@ def main() -> int:
         print(key.verify_key.encode(nacl.encoding.HexEncoder).decode())
         return 0
     if a.cmd == "publish":
+        if a.registry and a.tree:
+            ap.error("--registry requires --img from a trusted factory build, not --tree")
         key = load_key(a.key)
         a.feed.mkdir(parents=True, exist_ok=True)
         if a.tree:
@@ -475,7 +536,8 @@ def main() -> int:
             with tempfile.TemporaryDirectory(dir=a.feed.parent) as work:
                 tree = extract_image(a.img, Path(work))
                 client = add_client(tree, a.client) if a.client else None
-                publish_tree(tree, a.feed, key, a.commit, a.repo, a.notes, client=client)
+                registry = export_registry(tree) if a.registry else None
+                publish_tree(tree, a.feed, key, a.commit, a.repo, a.notes, client=client, registry=registry)
         return 0
     if a.cmd == "verify":
         return verify_feed(a.feed, a.pub)

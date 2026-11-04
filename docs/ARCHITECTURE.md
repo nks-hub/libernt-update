@@ -29,6 +29,8 @@ The client trusts only the public key compiled into it. It checks the signature,
 
 A release lists the files under `Windows/`, `Program Files/` and `Program Files (x86)/` of the image's NTFS partition, the boot loaders of the image's boot partition under `BootPartition/`, and the client under `Program Files/LiberNT Update/`. Registry hives, logs, caches and `unattend.inf` are not serviced.
 
+`publish --img ... --registry` can also attach a hashed snapshot of factory registry defaults. It records keys and typed values from SYSTEM's selected Control and Services branches, SOFTWARE and DEFAULT; it excludes SAM, SECURITY and registry links. The input must be a trusted factory image, not an installed machine backup; `--tree --registry` is refused. This metadata does not yet make the client apply registry changes.
+
 ## Check
 
 `CheckForUpdate` compares the newest release with the disk:
