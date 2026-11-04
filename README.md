@@ -13,6 +13,8 @@ Updates an installed [LiberNT](https://github.com/nks-hub/LiberNT) system to a n
 
 [Architecture](docs/ARCHITECTURE.md) · [Operations](docs/OPERATIONS.md) · [Screenshots of an update from upstream](docs/SCREENSHOTS.md)
 
+[Goals and work progress](docs/PROGRESS.md) tracks the current limitation fixes and their verification.
+
 `server/luup.py` runs on the build machine: it reads `LiberNT.img` (`ninja liberntimg`), hashes the serviced files and publishes a signed release. `client/` builds `LiberNTUpdate.exe` (Win32, C++17, static CRT), which runs inside LiberNT, and `luupboot.exe`, a native program that replaces files at boot. The client speaks Czech on a Czech system and English elsewhere.
 
 ## Features
