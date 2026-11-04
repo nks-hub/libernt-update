@@ -33,16 +33,20 @@ A release lists the files under `Windows/`, `Program Files/` and `Program Files 
 
 `CheckForUpdate` compares the newest release with the disk:
 
-1. Hashes every file the manifest lists (a cache keyed by size and modification time skips unchanged files).
+1. Hashes actual file contents with at most four workers; it does not trust size and modification time as proof of unchanged contents.
 2. Keeps the variant Setup installed for `ntoskrnl.exe` and `hal.dll`.
-3. Treats a missing file as wanted only when it is new compared with the installed release (or the previous one), so files Setup left out are not added; boot loaders are only replaced, never added.
+3. Treats a missing file as wanted when it is new compared with the recorded installed release. An unknown installation requires a verified `baseRelease`; the previous release is never assumed. Boot loaders are only replaced, never added.
+
+Checks, installs, recovery, cancellation and rollback share a machine-wide mutex. Downloaded metadata is limited to 16 MiB, signatures to 256 bytes, and objects to their signed length with a 512 MiB maximum. The data directory must have trusted ownership, no writable access for ordinary users and no reparse points.
 
 ## Install
 
 `InstallUpdate` downloads and verifies every changed file into `tx/<id>/new/`, copies each file it will replace into `tx/<id>/backup/` and writes `tx/<id>/tx.json` with the absolute target path of every operation. Later stages use these paths and never map manifest paths again.
 
+The active transaction is flushed to `state.json` before replacement starts. Recovery can restore a partly applied direct installation, including a client interrupted after its old EXE was renamed aside.
+
 - **Direct** - when no target is in use (or only the client's own files, which are renamed aside), files are moved into place, verified by hash and restored from the backup when anything fails.
-- **At the next restart** - when a target is in use, nothing changes on disk yet. The client writes `boot/plan.txt` (the moves) and `boot/rollback.txt` (their undo), registers `luupboot.exe` in `BootExecute` and adds the recovery entry to `freeldr.ini`.
+- **At the next restart** - when a target is in use, the client writes `boot/plan.txt` and `boot/rollback.txt`, registers `luupboot.exe` in `BootExecute` and adds the recovery entry to `freeldr.ini`. Replacement copies into a temporary file on the target volume before a same-volume rename, so an EFI target can be on another volume.
 
 ## Boot
 
@@ -51,10 +55,12 @@ smss runs `luupboot \??\C:\ProgramData\LiberNTUpdate` before any Win32 process a
 | Found in `boot/` | luupboot does |
 |---|---|
 | `plan.txt` | applies it, renames it to `plan.done`, writes `trial` = 1 and `result.txt` / `plan.log` |
+| `applying` | an interrupted installation; apply the rollback even if `plan.txt` was already renamed |
+| `committed` | the service already committed cancellation or completion; do not run the old plans |
 | `trial` without a plan | counts the boot; on the third unconfirmed boot applies `rollback.txt` and writes `rolledback` |
 | boot entry with `/LNTUROLLBACK` | applies `rollback.txt` at once (or drops a plan that has not run) |
 
-The `LiberNTUpdate` service then verifies every target, confirms the update (removes `trial`, the plans and the recovery entry) or rolls it back.
+The first service start verifies the disk but retains recovery. The next boot must have a different kernel boot identity before the service confirms it. A durable `committed` marker disables boot actions before the plan directory is retired and `pending` is cleared.
 
 ## Rollback paths
 
@@ -70,7 +76,7 @@ A rollback touches only files whose hash is exactly what the update wrote; anyth
 
 ## Self-update
 
-The service copies the exe it runs from to `watchdog/<hash>.exe` when it starts. When an update replaces `LiberNTUpdate.exe`, the running exe is renamed to `*.old-<tx>` and the new one takes its name. The service then starts the watchdog copy with `/watch-self-update <tx>` and stops. The watchdog restarts the service and requires it to stay running for 30 seconds; otherwise it rolls the transaction back and starts the service with the previous client.
+Before replacing the client, every install path snapshots the running EXE and registers `LiberNTUpdateGuard` from that snapshot. Direct updates start the snapshot with `/watch-self-update <tx>`; restart updates run it as an independent automatic service. The watchdog requires the new service to keep running for 30 seconds. A failed direct update is restored; a failed restart update requests boot rollback. The guard is removed after completion or recovery.
 
 ## Data folder
 
@@ -93,8 +99,8 @@ UTF-16LE, one operation per line:
 
 ```
 LUUP 1
-M<TAB>\??\C:\ProgramData\LiberNTUpdate\tx\<id>\new\0.bin<TAB>\??\C:\Windows\explorer.exe
-D<TAB>\??\C:\Windows\old.dll
+R<TAB><source><TAB><target><TAB><expected-current-file>
+X<TAB><target><TAB><expected-current-file>
 ```
 
-`M` moves a file over the target (clearing read-only first when needed), `D` deletes it. luupboot keeps going after a failed line and lists every failure in `plan.log`.
+`R` replaces a file and `X` deletes it only when the target still matches the recorded contents. `-` means the target must be absent. An already restored target succeeds without another write. Sources remain available for retries. Legacy `M`, `C` and `D` plans are still readable. Failures remain pending and are recorded in the boot log.

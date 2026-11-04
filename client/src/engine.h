@@ -19,6 +19,8 @@ struct Config {
     std::string autoMode = "install";  ///< service: "install" (check and install), "notify" (check only), "off"
     int checkMinutes = 360;            ///< how often the service checks the feed
     int restartHour = 3;               ///< local hour for the automatic restart of a pending update; -1 = never
+    std::wstring bootRoot;             ///< explicit EFI partition when Setup cannot identify the boot volume
+    std::string baseRelease;            ///< verified release id for an installation not yet recorded in state
 };
 Config LoadConfig();
 
@@ -47,11 +49,14 @@ void SnapshotRunningClient();
 void ServiceHousekeeping();
 
 /// Stops the LiberNTUpdate service if it runs, starts it and requires it to stay running for 30 s.
-bool RestartService(std::wstring& error);
+bool RestartService(std::wstring& error, const wchar_t* serviceName = L"LiberNTUpdate");
 
 /// Run from the previous client's exe after a self-update: restarts the service with the new client and rolls the
 /// transaction back when the new client does not keep running.
 bool WatchSelfUpdate(const std::string& tx);
+bool RegisterSelfUpdateGuard(const std::string& tx, std::wstring& error);
+void RemoveSelfUpdateGuard(const std::string& tx);
+std::string SelfUpdateGuardTransaction();
 
 struct Change {
     std::string path;    ///< manifest path, forward slashes, relative to the root

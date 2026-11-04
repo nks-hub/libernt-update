@@ -14,10 +14,12 @@ PUSH_KEY=${PUSH_KEY:-/root/.ssh/luup_push}
 CLIENT_REPO=${CLIENT_REPO:-nks-hub/libernt-update}
 CLIENT_CACHE=${CLIENT_CACHE:-/var/cache/luup/client}
 
-# Prints the folder with the newest client release, downloading and checking it the first time.
+# Prints the folder with the newest client release; cached files are checked on every run.
 fetch_client() {
     tag=$(curl -fsSL "https://api.github.com/repos/$CLIENT_REPO/releases/latest" |
           python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+    case "$tag" in v[0-9]* ) ;; * ) echo "invalid client release tag" >&2; exit 1 ;; esac
+    case "$tag" in *[!a-zA-Z0-9._-]* ) echo "unsafe client release tag" >&2; exit 1 ;; esac
     dir="$CLIENT_CACHE/$tag"
     if [ ! -f "$dir/VERSION" ]; then
         mkdir -p "$dir.part"
@@ -28,12 +30,15 @@ fetch_client() {
         echo "$tag" > "$dir.part/VERSION"
         mv "$dir.part" "$dir"
     fi
+    (cd "$dir" && sha256sum --check --strict --quiet SHA256SUMS) >&2
+    [ "$(cat "$dir/VERSION")" = "$tag" ] || { echo "cached client version mismatch" >&2; exit 1; }
     echo "$dir"
 }
 
 client_dir=$(fetch_client)
 client=$(cat "$client_dir/VERSION")
 cd "$SRC"
+[ -z "$(git status --porcelain --untracked-files=normal)" ] || { echo "source checkout is dirty" >&2; exit 1; }
 git fetch -q origin nks
 git checkout -q -B nks origin/nks
 head=$(git rev-parse HEAD)
@@ -49,9 +54,14 @@ else
         cmake -S "$SRC" -B "$OUT" > /dev/null
     fi
     ninja -C "$OUT" -j"$(nproc)" liberntimg
+    [ -z "$(git status --porcelain --untracked-files=normal)" ] && [ "$(git rev-parse HEAD)" = "$head" ] || {
+        echo "source checkout changed while building" >&2; exit 1;
+    }
     python3 "$LUUP" publish --key "$KEY" --feed "$FEED" --img "$OUT/LiberNT.img" --commit "$head" --repo "$SRC" --client "$client_dir"
-    python3 "$LUUP" verify --feed "$FEED" --pub "$(cat "${KEY%.key}.pub")"
 fi
+
+# A previous publish can have failed verification. Never push that feed on the next already-published run.
+python3 "$LUUP" verify --feed "$FEED" --pub "$(cat "${KEY%.key}.pub")"
 
 if [ -n "$FEED_PUSH" ]; then
     # Objects and manifests first, the signed feed last: clients never see a release whose files are missing.

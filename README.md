@@ -61,7 +61,7 @@ start "" /wait "C:\Program Files\LiberNT Update\LiberNTUpdate.exe" /register
 
 ## Configuration
 
-`%ProgramData%\LiberNTUpdate\config.json`, every key optional:
+`%ProgramData%\LiberNTUpdate\config.json`:
 
 ```json
 {"feedUrl": "http://updates.example.org/", "root": "C:\\", "auto": "install", "checkMinutes": 360, "restartHour": 3}
@@ -70,10 +70,14 @@ start "" /wait "C:\Program Files\LiberNT Update\LiberNTUpdate.exe" /register
 | Key | Meaning |
 |---|---|
 | `feedUrl` | feed address; overrides the one compiled in |
+| `baseRelease` | verified installed release ID, required for the first update when `state.json` does not record it; the client refuses to guess |
+| `bootRoot` | explicit boot partition path when Setup cannot identify the EFI partition; check and install use the same mapping, including offline feeds |
 | `auto` | `install` checks and installs, `notify` only checks (the tray icon announces it), `off` |
 | `checkMinutes` | interval of the automatic check |
 | `restartHour` | local hour of the automatic restart for a pending update, `-1` never |
 | `language` | `cs` or `en`; without it the window, tray and messages follow the Windows UI language (Czech, otherwise English) |
+
+An update applied by `BootExecute` needs two restarts. The first replaces files after the old kernel has loaded; the second starts the new files. The recovery entry and rollback plan stay available until the second boot is confirmed. Restarting the service does not confirm a new boot. `/cancel` is accepted only before replacement starts.
 
 ## Usage
 
@@ -131,7 +135,7 @@ nginx serves `feed/` read-only with `no-cache` on `feed.json` and long caching f
 - Registry changes of a new build (new drivers or services in `hivesys.inf`) are not applied.
 - A boot-start driver that crashes before smss runs stops `luupboot.exe` too; the recovery entry starts the previous kernel and HAL but the new boot drivers. Take a VM snapshot before trying risky builds.
 - A new boot loader that does not start cannot be undone from inside the system; its backup stays in the transaction folder.
-- Loader replacement on the EFI system partition is tested on a FAT volume found by volume enumeration (install, check, rollback); booting a UEFI machine after such an update is not tested yet.
+- The boot partition must be identified by Setup or configured explicitly with `bootRoot`. Booting a UEFI machine after a loader update still requires platform testing.
 - In LiberNT's modern taskbar a new tray icon sits in the overflow until the user pins it, and announcements go to the notification center.
 
 ## Testing

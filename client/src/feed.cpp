@@ -14,6 +14,7 @@
 #include "feed_internal.h"
 #include "http.h"
 #include "pubkey.h"
+#include "runtime.h"
 #include "sha256.h"
 #include "util.h"
 
@@ -52,7 +53,8 @@ bool HexToBytes(const std::string& hex, std::vector<uint8_t>& out) {
     for (size_t i = 0; i < hex.size(); i += 2) {
         if (!std::isxdigit((unsigned char)hex[i]) || !std::isxdigit((unsigned char)hex[i + 1])) return false;
         char* end = nullptr;
-        long value = strtol(hex.substr(i, 2).c_str(), &end, 16);
+        std::string byte = hex.substr(i, 2);
+        long value = strtol(byte.c_str(), &end, 16);
         if (*end) return false;
         out.push_back((uint8_t)value);
     }
@@ -72,15 +74,16 @@ bool VerifySignature(const std::vector<uint8_t>& message, const std::string& sig
 }
 
 bool Fetch(const Config& cfg, const std::string& relative, std::vector<uint8_t>& out, std::wstring& error) {
+    size_t limit = relative == "feed.json.sig" ? 256 : 16u * 1024u * 1024u;
     std::wstring url = cfg.feedUrl + Widen(relative);
     if (cfg.feedUrl.rfind(L"file:///", 0) == 0) {
         std::wstring path = url.substr(8);
         std::replace(path.begin(), path.end(), L'/', L'\\');
-        if (ReadFileBytes(path, out)) return true;
+        if (ReadFileBytes(path, out, limit)) return true;
         error = path + L": " + LastErrorText(GetLastError());
         return false;
     }
-    return HttpGet(url, out, error);
+    return HttpGet(url, out, error, limit);
 }
 
 std::string Lower(std::string value) {
@@ -90,44 +93,17 @@ std::string Lower(std::string value) {
 
 bool SafeManifestPath(const std::string& path) {
     if (path.empty() || path.front() == '/' || path.find('\\') != std::string::npos || path.find(':') != std::string::npos) return false;
+    for (unsigned char c : path)
+        if (c < 32 || c == 127 || c == '%' || c == '"' || c == '<' || c == '>' || c == '|' || c == '?' || c == '*') return false;
     size_t start = 0;
     while (start <= path.size()) {
         size_t end = path.find('/', start);
         std::string part = path.substr(start, end == std::string::npos ? std::string::npos : end - start);
-        if (part.empty() || part == "." || part == "..") return false;
+        if (part.empty() || part == "." || part == ".." || part.back() == '.' || part.back() == ' ') return false;
         if (end == std::string::npos) break;
         start = end + 1;
     }
     return true;
-}
-
-std::wstring EspRoot() {
-    static bool done = false;
-    static std::wstring esp;
-    if (done) return esp;
-    done = true;
-    wchar_t volume[MAX_PATH];
-    HANDLE find = FindFirstVolumeW(volume, MAX_PATH);
-    if (find == INVALID_HANDLE_VALUE) return esp;
-    do {
-        if (FileExists(std::wstring(volume) + L"EFI\\LiberNT\\Boot\\bootmgfw.efi")) {
-            esp = volume;
-            break;
-        }
-    } while (FindNextVolumeW(find, volume, MAX_PATH));
-    FindVolumeClose(find);
-    return esp;
-}
-
-std::wstring TargetPath(const Config& cfg, const std::string& relative) {
-    std::wstring path = Widen(relative);
-    std::replace(path.begin(), path.end(), L'/', L'\\');
-    const std::wstring boot = L"BootPartition\\";
-    if (path.size() > boot.size() && _wcsnicmp(path.c_str(), boot.c_str(), boot.size()) == 0) {
-        std::wstring esp = cfg.feedUrl.rfind(L"file:///", 0) == 0 ? L"" : EspRoot();
-        return JoinPath(esp.empty() ? cfg.root : esp, path.substr(boot.size()));
-    }
-    return JoinPath(cfg.root, path);
 }
 
 }  // namespace
@@ -135,6 +111,9 @@ std::wstring TargetPath(const Config& cfg, const std::string& relative) {
 void SetFeedTestPublicKey(const std::string& publicKeyHex) { g_testPublicKey = publicKeyHex; }
 
 bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, const Progress& progress) {
+    UpdateLock operation(error);
+    if (!operation || !SecureUpdateData(error)) return false;
+    try {
     out = CheckResult{};
     json clientState = LoadState();
     out.installed = clientState.value("installed", "");
@@ -269,7 +248,14 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
     const json* baseRelease = nullptr;
     for (auto& item : releases)
         if (!out.installed.empty() && item.value("id", "") == out.installed) baseRelease = &item;
-    if (!baseRelease && releases.size() >= 2) baseRelease = &releases[releases.size() - 2];
+    if (!baseRelease && !cfg.baseRelease.empty())
+        for (auto& item : releases)
+            if (item.value("id", "") == cfg.baseRelease) baseRelease = &item;
+    if (!baseRelease && out.installed.empty()) {
+        error = Tr(L"Výchozí vydání není známé. Nastavte ověřené baseRelease v config.json.",
+                   L"The installed release is unknown. Set a verified baseRelease in config.json.");
+        return false;
+    }
     std::map<std::string, std::string> basePaths;
     std::map<std::string, std::string> baseNames;
     if (baseRelease && baseRelease->value("id", "") != out.latest.id) {
@@ -325,7 +311,13 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
     std::vector<HashWork> hashWork;
     hashWork.reserve(pathsToHash.size());
     for (auto& [key, path] : pathsToHash) {
-        hashWork.push_back({key, path, TargetPath(cfg, path), ""});
+        std::wstring target = TargetPath(cfg, path);
+        if (target.empty()) {
+            error = Tr(L"Nelze určit EFI oddíl. Nastavte bootRoot v config.json.",
+                       L"Cannot identify the EFI partition. Set bootRoot in config.json.");
+            return false;
+        }
+        hashWork.push_back({key, path, target, ""});
     }
     std::atomic<size_t> nextHash{0};
     std::atomic<size_t> completedHashes{0};
@@ -403,4 +395,9 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
     }
     if (progress) progress(100, Tr(L"Změněných souborů: ", L"Changed files: ") + std::to_wstring(out.changes.size()) + L".");
     return true;
+    } catch (const json::exception&) {
+        error = Tr(L"Podepsaný feed nebo manifest má neplatnou strukturu.", L"The signed feed or manifest has an invalid structure.");
+        out.changes.clear();
+        return false;
+    }
 }

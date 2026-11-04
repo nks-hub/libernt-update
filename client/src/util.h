@@ -13,7 +13,7 @@ std::string NowIso();
 /// Sortable id from the current UTC time, e.g. 20261103-132835.
 std::string NowId();
 
-bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>& out);
+bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>& out, size_t maxBytes = 512u * 1024u * 1024u);
 /// Writes through a temporary file and renames it into place, so a crash never leaves a torn file.
 bool WriteFileAtomic(const std::wstring& path, const void* data, size_t len);
 bool WriteTextAtomic(const std::wstring& path, const std::string& text);

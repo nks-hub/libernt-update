@@ -7,6 +7,7 @@
 #include <string>
 
 #include "engine.h"
+#include "runtime.h"
 #include "util.h"
 
 int RunGui(HINSTANCE inst);
@@ -17,16 +18,24 @@ namespace {
 SERVICE_STATUS_HANDLE g_status;
 SERVICE_STATUS g_svc{SERVICE_WIN32_OWN_PROCESS};
 HANDLE g_stop;
+std::string g_guardTx;
 
 /// Writes to the console or pipe the program was started from, and to %ProgramData%\LiberNTUpdate\cli-output.txt
 /// (a GUI-subsystem program started by cmd.exe gets no pipe, so the file is what scripts read).
 void Out(const std::wstring& text) {
-    static bool attached = AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+    static bool attached = []() {
+        HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+        DWORD type = output && output != INVALID_HANDLE_VALUE ? GetFileType(output) : FILE_TYPE_UNKNOWN;
+        // AttachConsole replaces redirected handles. Keep the pipe or file supplied by the calling script.
+        return type == FILE_TYPE_PIPE || type == FILE_TYPE_DISK ? false : AttachConsole(ATTACH_PARENT_PROCESS) != 0;
+    }();
     (void)attached;
     std::string s = Narrow(text + L"\r\n");
     DWORD wrote;
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     if (h && h != INVALID_HANDLE_VALUE) WriteFile(h, s.data(), (DWORD)s.size(), &wrote, nullptr);
+    std::wstring securityError;
+    if (!SecureUpdateData(securityError)) return;
     std::wstring path = JoinPath(DataDir(), L"cli-output.txt");
     EnsureDirs(path, true);
     HANDLE f = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -53,13 +62,26 @@ DWORD WINAPI ServiceControl(DWORD control, DWORD, void*, void*) {
 
 /// At boot: finish or roll back a pending update; then check and install updates until the service stops.
 void WINAPI ServiceMain(DWORD, LPWSTR*) {
-    g_status = RegisterServiceCtrlHandlerExW(L"LiberNTUpdate", ServiceControl, nullptr);
+    g_status = RegisterServiceCtrlHandlerExW(g_guardTx.empty() ? L"LiberNTUpdate" : L"LiberNTUpdateGuard", ServiceControl, nullptr);
     g_stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    ReportService(SERVICE_RUNNING);
+    ReportService(SERVICE_START_PENDING);
+    std::wstring permissions;
+    if (!SecureUpdateData(permissions)) {
+        LogLine(Narrow(permissions));
+        ReportService(SERVICE_STOPPED, ERROR_ACCESS_DENIED);
+        return;
+    }
+    if (!g_guardTx.empty()) {
+        ReportService(SERVICE_RUNNING);
+        bool ok = WatchSelfUpdate(g_guardTx);
+        ReportService(SERVICE_STOPPED, ok ? NO_ERROR : ERROR_SERVICE_SPECIFIC_ERROR);
+        return;
+    }
     SnapshotRunningClient();
     std::wstring msg;
     if (FinalizePending(LoadConfig(), msg)) LogLine("service: " + Narrow(msg));
     ServiceHousekeeping();
+    ReportService(SERVICE_RUNNING);
     RunAutomatic(g_stop);
     ReportService(SERVICE_STOPPED);
 }
@@ -89,7 +111,8 @@ const wchar_t* OutcomeName(InstallOutcome r) {
 }
 
 int Cli(const std::wstring& cmd) {
-    DeleteFileW(JoinPath(DataDir(), L"cli-output.txt").c_str());
+    std::wstring securityError;
+    if (SecureUpdateData(securityError)) DeleteFileW(JoinPath(DataDir(), L"cli-output.txt").c_str());
     Config cfg = LoadConfig();
     Progress quiet;
     if (cmd == L"/selftest") {
@@ -182,9 +205,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR, int) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     std::wstring cmd = argc > 1 ? argv[1] : L"";
+    if (cmd == L"/guard-service" && argc > 2) g_guardTx = Narrow(argv[2]);
     LocalFree(argv);
-    if (cmd == L"/service") {
-        SERVICE_TABLE_ENTRYW table[] = {{const_cast<LPWSTR>(L"LiberNTUpdate"), ServiceMain}, {nullptr, nullptr}};
+    if (cmd == L"/service" || (cmd == L"/guard-service" && !g_guardTx.empty())) {
+        SERVICE_TABLE_ENTRYW table[] = {{const_cast<LPWSTR>(g_guardTx.empty() ? L"LiberNTUpdate" : L"LiberNTUpdateGuard"), ServiceMain}, {nullptr, nullptr}};
         return StartServiceCtrlDispatcherW(table) ? 0 : 1;
     }
     if (cmd == L"/tray") return RunTray(inst);

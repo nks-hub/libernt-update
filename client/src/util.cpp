@@ -4,6 +4,7 @@
 #include <cstdio>
 
 #include "engine.h"
+#include "runtime.h"
 #include "sha256.h"
 
 std::wstring Widen(const std::string& s) {
@@ -38,12 +39,13 @@ std::string NowId() {
     return buf;
 }
 
-bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>& out) {
+bool ReadFileBytes(const std::wstring& path, std::vector<uint8_t>& out, size_t maxBytes) {
     HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                            OPEN_EXISTING, FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
     if (h == INVALID_HANDLE_VALUE) return false;
     LARGE_INTEGER size;
-    bool ok = GetFileSizeEx(h, &size) && size.QuadPart < (1LL << 31);
+    bool ok = GetFileSizeEx(h, &size) && size.QuadPart >= 0 && (ULONGLONG)size.QuadPart <= maxBytes;
+    if (!ok) SetLastError(ERROR_FILE_TOO_LARGE);
     if (ok) {
         out.resize((size_t)size.QuadPart);
         DWORD got = 0;
@@ -127,6 +129,8 @@ std::wstring LastErrorText(DWORD err) {
 }
 
 void LogLine(const std::string& line) {
+    std::wstring securityError;
+    if (!SecureUpdateData(securityError)) return;
     std::wstring path = JoinPath(DataDir(), L"update.log");
     EnsureDirs(path, true);
     HANDLE h = CreateFileW(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,

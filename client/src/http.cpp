@@ -5,7 +5,7 @@
 
 #include "util.h"
 
-bool HttpGet(const std::wstring& url, std::vector<uint8_t>& out, std::wstring& error) {
+bool HttpGet(const std::wstring& url, std::vector<uint8_t>& out, std::wstring& error, size_t maxBytes) {
     out.clear();
     HINTERNET net = InternetOpenW(L"LiberNTUpdate/1.0", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
     if (!net) { error = L"InternetOpen: " + LastErrorText(GetLastError()); return false; }
@@ -38,6 +38,12 @@ bool HttpGet(const std::wstring& url, std::vector<uint8_t>& out, std::wstring& e
             break;
         }
         if (!got) break;
+        if (out.size() > maxBytes || got > maxBytes - out.size()) {
+            error = L"HTTP response exceeds the download limit.";
+            ok = false;
+            out.clear();
+            break;
+        }
         out.insert(out.end(), buf, buf + got);
     }
     InternetCloseHandle(req);

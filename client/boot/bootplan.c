@@ -232,6 +232,70 @@ static ULONG Len(PCWSTR s) {
     return n;
 }
 
+static BOOLEAN SameContents(PCWSTR a, PCWSTR b) {
+    UNICODE_STRING us;
+    OBJECT_ATTRIBUTES oa;
+    IO_STATUS_BLOCK iosb;
+    HANDLE left = NULL, right = NULL;
+    LUUP_STANDARD_INFO first, second;
+    PVOID memory = NULL;
+    BOOLEAN equal = FALSE;
+    ULONGLONG remaining;
+    NTSTATUS st;
+    InitPath(&us, &oa, a);
+    st = NtOpenFile(&left, GENERIC_READ | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ,
+                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (!NT_SUCCESS(st)) goto out;
+    InitPath(&us, &oa, b);
+    st = NtOpenFile(&right, GENERIC_READ | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ,
+                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (!NT_SUCCESS(st)) goto out;
+    if (!NT_SUCCESS(NtQueryInformationFile(left, &iosb, &first, sizeof(first), LUUP_FileStandardInformation)) ||
+        !NT_SUCCESS(NtQueryInformationFile(right, &iosb, &second, sizeof(second), LUUP_FileStandardInformation)) ||
+        first.EndOfFile.QuadPart != second.EndOfFile.QuadPart) goto out;
+    memory = Alloc(128u * 1024u);
+    if (!memory) goto out;
+    remaining = (ULONGLONG)first.EndOfFile.QuadPart;
+    equal = TRUE;
+    while (remaining && equal) {
+        ULONG size = remaining > 65536 ? 65536 : (ULONG)remaining, i;
+        if (!NT_SUCCESS(NtReadFile(left, NULL, NULL, NULL, &iosb, memory, size, NULL, NULL)) || iosb.Information != size ||
+            !NT_SUCCESS(NtReadFile(right, NULL, NULL, NULL, &iosb, (UCHAR*)memory + 65536, size, NULL, NULL)) || iosb.Information != size) {
+            equal = FALSE;
+            break;
+        }
+        for (i = 0; i < size; i++) if (((UCHAR*)memory)[i] != ((UCHAR*)memory)[65536 + i]) { equal = FALSE; break; }
+        remaining -= size;
+    }
+out:
+    if (left) NtClose(left);
+    if (right) NtClose(right);
+    LuupFree(memory);
+    return equal;
+}
+
+static BOOLEAN ExpectedContents(PCWSTR target, PCWSTR expected) {
+    return expected[0] == L'-' && !expected[1] ? !LuupFileExists(target) : SameContents(target, expected);
+}
+
+static NTSTATUS GuardedReplace(PCWSTR source, PCWSTR target, PCWSTR expected) {
+    PWSTR temporary;
+    ULONG length;
+    NTSTATUS st;
+    if (SameContents(source, target)) return STATUS_SUCCESS;
+    if (!ExpectedContents(target, expected)) return STATUS_OBJECT_NAME_COLLISION;
+    length = Len(target);
+    temporary = (PWSTR)Alloc((length + 16) * sizeof(WCHAR));
+    if (!temporary) return LUUP_STATUS_NO_MEMORY;
+    Copy(temporary, target, length * sizeof(WCHAR));
+    Copy(temporary + length, L".lntu-new", 10 * sizeof(WCHAR));
+    st = LuupCopyFile(source, temporary);
+    if (NT_SUCCESS(st)) st = LuupRenameFile(temporary, target, TRUE);
+    if (!NT_SUCCESS(st)) LuupDeleteFile(temporary);
+    LuupFree(temporary);
+    return st;
+}
+
 static NTSTATUS RenameOnce(PCWSTR from, PCWSTR to, BOOLEAN replace) {
     UNICODE_STRING us;
     OBJECT_ATTRIBUTES oa;
@@ -350,6 +414,12 @@ NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result, PCWSTR logNtPath)
         b = NextField(&cur);
         if (op[0] == L'M' && !op[1] && a && b) st = LuupRenameFile(a, b, TRUE);
         else if (op[0] == L'C' && !op[1] && a && b) st = LuupCopyFile(a, b);
+        else if (op[0] == L'R' && !op[1] && a && b) {
+            PWSTR expected = NextField(&cur);
+            st = expected ? GuardedReplace(a, b, expected) : LUUP_STATUS_INVALID_PARAMETER;
+        }
+        else if (op[0] == L'X' && !op[1] && a && b)
+            st = !LuupFileExists(a) || ExpectedContents(a, b) ? LuupDeleteFile(a) : STATUS_OBJECT_NAME_COLLISION;
         else if (op[0] == L'D' && !op[1] && a) st = LuupDeleteFile(a);
         else st = LUUP_STATUS_INVALID_PARAMETER;
         if (NT_SUCCESS(st)) {
@@ -435,25 +505,32 @@ static ULONG ReadCount(PCWSTR path) {
     return n;
 }
 
-static void WriteCount(PCWSTR path, ULONG n) {
+static NTSTATUS WriteCount(PCWSTR path, ULONG n) {
     char buf[12];
     char* p = PutNum(buf, n, 10);
-    LuupWriteFile(path, buf, (ULONG)(p - buf));
+    return LuupWriteFile(path, buf, (ULONG)(p - buf));
 }
 
 NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR text)) {
     PWSTR plan = BootFile(dataDirNt, L"plan.txt"), planDone = BootFile(dataDirNt, L"plan.done");
     PWSTR rb = BootFile(dataDirNt, L"rollback.txt"), rbDone = BootFile(dataDirNt, L"rollback.done");
     PWSTR trial = BootFile(dataDirNt, L"trial"), result = BootFile(dataDirNt, L"result.txt");
+    PWSTR applying = BootFile(dataDirNt, L"applying");
+    PWSTR committed = BootFile(dataDirNt, L"committed");
     PWSTR marker = BootFile(dataDirNt, L"rolledback"), cancelled = BootFile(dataDirNt, L"plan.cancelled");
     PWSTR planLog = BootFile(dataDirNt, L"plan.log"), rbLog = BootFile(dataDirNt, L"rollback.log");
     LUUP_RESULT r;
     NTSTATUS st = STATUS_SUCCESS;
     BOOLEAN rollback = FALSE;
 
-    if (!plan || !planDone || !rb || !rbDone || !trial || !result || !marker || !cancelled) {
+    if (!plan || !planDone || !rb || !rbDone || !trial || !result || !marker || !cancelled || !applying || !committed) {
         st = LUUP_STATUS_NO_MEMORY;
         goto out;
+    }
+    if (LuupFileExists(committed)) goto out;
+    if (LuupFileExists(applying)) {
+        rollback = TRUE;
+        goto restore;
     }
     if (LuupFileExists(plan)) {
         if (forceRollback) {
@@ -464,27 +541,43 @@ NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR te
             goto out;
         }
         if (say) say(L"LiberNT Update: installing the update...\n");
+        st = LuupWriteFile(applying, "applying\n", 9);
+        if (!NT_SUCCESS(st)) goto out;
         st = LuupApplyPlan(plan, &r, planLog);
         WriteResult(result, "plan", &r, st);
-        LuupRenameFile(plan, planDone, TRUE);
-        WriteCount(trial, 1);
+        if (!NT_SUCCESS(st) || r.Failed) {
+            rollback = TRUE;
+            goto restore;
+        }
+        st = LuupRenameFile(plan, planDone, TRUE);
+        if (!NT_SUCCESS(st)) goto out;
+        st = WriteCount(trial, 1);
+        if (!NT_SUCCESS(st)) goto out;
+        LuupDeleteFile(applying);
         goto out;
     }
     if (LuupFileExists(trial)) {
         ULONG n = ReadCount(trial) + 1;
         rollback = forceRollback || n >= 3;
-        if (!rollback) WriteCount(trial, n);
+        if (!rollback) {
+            st = WriteCount(trial, n);
+            if (!NT_SUCCESS(st)) goto out;
+        }
     } else {
         rollback = forceRollback;
     }
+restore:
     if (rollback && LuupFileExists(rb)) {
         if (say) say(L"LiberNT Update: restoring the previous version...\n");
         st = LuupApplyPlan(rb, &r, rbLog);
         WriteResult(result, "rollback", &r, st);
         if (NT_SUCCESS(st) && !r.Failed) {
+            st = LuupWriteFile(marker, "rolledback\n", 11);
+            if (!NT_SUCCESS(st)) goto out;
             LuupRenameFile(rb, rbDone, TRUE);
             LuupDeleteFile(trial);
-            LuupWriteFile(marker, "rolledback\n", 11);
+            LuupDeleteFile(plan);
+            LuupDeleteFile(applying);
         } else if (NT_SUCCESS(st)) {
             st = r.FirstFailure;
         }
@@ -493,5 +586,7 @@ out:
     LuupFree(plan); LuupFree(planDone); LuupFree(rb); LuupFree(rbDone);
     LuupFree(trial); LuupFree(result); LuupFree(marker); LuupFree(cancelled);
     LuupFree(planLog); LuupFree(rbLog);
+    LuupFree(applying);
+    LuupFree(committed);
     return st;
 }

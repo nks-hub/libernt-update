@@ -174,6 +174,16 @@ def load_key(path: Path) -> nacl.signing.SigningKey:
     return nacl.signing.SigningKey(bytes.fromhex(path.read_text().strip()))
 
 
+def create_key(path: Path) -> nacl.signing.SigningKey:
+    key = nacl.signing.SigningKey.generate()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="ascii") as output:
+        output.write(key.encode(nacl.encoding.HexEncoder).decode() + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+    return key
+
+
 def write_json(path: Path, data) -> bytes:
     raw = (json.dumps(data, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -218,6 +228,13 @@ def git_notes(repo: Path, old_commit: str | None, new_commit: str) -> list[str]:
 def add_client(tree: Path, client_dir: Path) -> str:
     """Puts the client (LiberNTUpdate.exe, luupboot.exe) into the tree, so updates also update the updater.
     client_dir is an unpacked client release; its VERSION file names the version."""
+    sums = {}
+    for line in (client_dir / "SHA256SUMS").read_text("ascii").splitlines():
+        digest, name = line.split(maxsplit=1)
+        sums[name.lstrip(" *")] = digest
+    for name in CLIENT_FILES:
+        if sums.get(name) != sha256_file(client_dir / name):
+            raise SystemExit(f"cached client checksum mismatch: {name}")
     dest = tree / CLIENT_DIR
     dest.mkdir(parents=True, exist_ok=True)
     for name in CLIENT_FILES:
@@ -335,6 +352,17 @@ def self_test() -> int:
         tmp = Path(tmp)
         key = nacl.signing.SigningKey.generate()
         pub = key.verify_key.encode(nacl.encoding.HexEncoder).decode()
+        generated_path = tmp / "generated.key"
+        create_key(generated_path)
+        original_key = generated_path.read_bytes()
+        try:
+            create_key(generated_path)
+            raise AssertionError("existing signing key overwritten")
+        except FileExistsError:
+            pass
+        assert generated_path.read_bytes() == original_key
+        if os.name != "nt":
+            assert generated_path.stat().st_mode & 0o777 == 0o600
         tree, feed = tmp / "tree", tmp / "feed"
         (tree / "Windows/system32/config").mkdir(parents=True)
         (tree / "Windows/system32/ntoskrnl.exe").write_bytes(b"kernel-v1")
@@ -363,7 +391,14 @@ def self_test() -> int:
         for name in CLIENT_FILES:
             (cdir / name).write_bytes(b"client " + name.encode())
         (cdir / "VERSION").write_text("v9.9.9\n")
+        (cdir / "SHA256SUMS").write_text("".join(f"{sha256_file(cdir / name)}  {name}\n" for name in CLIENT_FILES), encoding="ascii")
         e4 = publish_tree(tree, feed, key, "c" * 40, now=t0 + dt.timedelta(hours=3), client=add_client(tree, cdir))
+        (cdir / "LiberNTUpdate.exe").write_bytes(b"corrupt-cache")
+        try:
+            add_client(tree, cdir)
+            raise AssertionError("corrupt cached client accepted")
+        except SystemExit:
+            pass
         assert e4["client"] == "v9.9.9" and e4["changedFromPrevious"] == 2, e4
         m4 = json.loads((feed / e4["manifest"]).read_text("utf-8"))
         assert any(f["path"] == "Program Files/LiberNT Update/LiberNTUpdate.exe" for f in m4["files"])
@@ -427,11 +462,7 @@ def main() -> int:
     a = ap.parse_args()
 
     if a.cmd == "keygen":
-        if a.key.exists():
-            raise SystemExit(f"{a.key} exists; refusing to overwrite a signing key")
-        key = nacl.signing.SigningKey.generate()
-        a.key.write_text(key.encode(nacl.encoding.HexEncoder).decode() + "\n")
-        os.chmod(a.key, 0o600)
+        key = create_key(a.key)
         print(key.verify_key.encode(nacl.encoding.HexEncoder).decode())
         return 0
     if a.cmd == "publish":

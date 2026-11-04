@@ -10,6 +10,7 @@
 
 #include "feed_internal.h"
 #include "http.h"
+#include "runtime.h"
 #include "sha256.h"
 #include "util.h"
 
@@ -21,9 +22,14 @@ extern "C" {
 
 using json = nlohmann::json;
 
+bool StartSelfUpdateWatchdog(const std::string& tx);
+bool g_selfUpdateStarted = false;
+
 namespace {
 
 std::wstring g_dataOverride;  // set by SelfTest to keep its state away from the real one
+std::string g_testBootId;
+std::string BootIdentity() { return g_testBootId.empty() ? CurrentBootId() : g_testBootId; }
 
 const wchar_t kServiceName[] = L"LiberNTUpdate";
 const wchar_t kSessionManager[] = L"SYSTEM\\CurrentControlSet\\Control\\Session Manager";
@@ -47,45 +53,16 @@ std::string Trim(const std::string& s) {
 }
 
 /// Fetches a file of the feed: over HTTP, or from a directory for file:/// feeds (self-test, offline media).
-bool Fetch(const Config& cfg, const std::string& rel, std::vector<uint8_t>& out, std::wstring& error) {
+bool Fetch(const Config& cfg, const std::string& rel, std::vector<uint8_t>& out, std::wstring& error, size_t limit) {
     std::wstring url = cfg.feedUrl + Widen(rel);
     if (cfg.feedUrl.rfind(L"file:///", 0) == 0) {
         std::wstring path = url.substr(8);
         std::replace(path.begin(), path.end(), L'/', L'\\');
-        if (ReadFileBytes(path, out)) return true;
+        if (ReadFileBytes(path, out, limit)) return true;
         error = path + L": " + LastErrorText(GetLastError());
         return false;
     }
-    return HttpGet(url, out, error);
-}
-
-/// Root of the EFI system partition (\\?\Volume{...}\) when this is a UEFI install, empty otherwise.
-std::wstring EspRoot() {
-    static bool done = false;
-    static std::wstring esp;
-    if (done || !g_dataOverride.empty()) return esp;
-    done = true;
-    wchar_t vol[MAX_PATH];
-    HANDLE f = FindFirstVolumeW(vol, MAX_PATH);
-    if (f == INVALID_HANDLE_VALUE) return esp;
-    do {
-        if (FileExists(std::wstring(vol) + L"EFI\\LiberNT\\Boot\\bootmgfw.efi")) { esp = vol; break; }
-    } while (FindNextVolumeW(f, vol, MAX_PATH));
-    FindVolumeClose(f);
-    return esp;
-}
-
-/// Disk path of a manifest path. BootPartition/ (the image's boot partition) maps to the EFI system partition on UEFI
-/// installs and to the root of the system drive on BIOS installs, where Setup puts freeldr.sys and rosload.exe.
-std::wstring TargetPath(const Config& cfg, const std::string& rel) {
-    std::wstring p = Widen(rel);
-    std::replace(p.begin(), p.end(), L'/', L'\\');
-    const std::wstring boot = L"BootPartition\\";
-    if (p.size() > boot.size() && _wcsnicmp(p.c_str(), boot.c_str(), boot.size()) == 0) {
-        std::wstring esp = EspRoot();
-        return JoinPath(esp.empty() ? cfg.root : esp, p.substr(boot.size()));
-    }
-    return JoinPath(cfg.root, p);
+    return HttpGet(url, out, error, limit);
 }
 
 std::wstring TxDir(const std::string& tx) { return JoinPath(JoinPath(DataDir(), L"tx"), Widen(tx)); }
@@ -185,29 +162,31 @@ void RemoveRecoveryEntry(const Config& cfg) {
     DeleteFileW(JoinPath(sys, L"lntuphal.dll").c_str());
 }
 
-void AddRecoveryEntry(const Config& cfg) {
+bool AddRecoveryEntry(const Config& cfg) {
     std::wstring ini = FreeldrIni(cfg);
-    if (!FileExists(ini)) return;
+    if (!FileExists(ini)) return true;
     wchar_t sys[MAX_PATH], def[128], type[64], path[260], opts[512];
     GetSystemDirectoryW(sys, MAX_PATH);
     if (!CopyFileW(JoinPath(sys, L"ntoskrnl.exe").c_str(), JoinPath(sys, L"lntuprev.exe").c_str(), FALSE) ||
         !CopyFileW(JoinPath(sys, L"hal.dll").c_str(), JoinPath(sys, L"lntuphal.dll").c_str(), FALSE)) {
         LogLine("recovery entry skipped: cannot copy the current kernel and HAL: " + Narrow(LastErrorText(GetLastError())));
-        return;
+        return false;
     }
     GetPrivateProfileStringW(L"FREELOADER", L"DefaultOS", L"", def, 128, ini.c_str());
     GetPrivateProfileStringW(def, L"BootType", L"Windows2003", type, 64, ini.c_str());
     GetPrivateProfileStringW(def, L"SystemPath", L"", path, 260, ini.c_str());
     GetPrivateProfileStringW(def, L"Options", L"", opts, 512, ini.c_str());
-    if (!*path) return;
+    if (!*path) return false;
     DWORD attrs = GetFileAttributesW(ini.c_str());
     SetFileAttributesW(ini.c_str(), FILE_ATTRIBUTE_NORMAL);
-    WritePrivateProfileStringW(L"Operating Systems", kRecoverySection, L"\"LiberNT (undo the last update)\"", ini.c_str());
-    WritePrivateProfileStringW(kRecoverySection, L"BootType", type, ini.c_str());
-    WritePrivateProfileStringW(kRecoverySection, L"SystemPath", path, ini.c_str());
+    bool ok = WritePrivateProfileStringW(L"Operating Systems", kRecoverySection, L"\"LiberNT (undo the last update)\"", ini.c_str()) &&
+              WritePrivateProfileStringW(kRecoverySection, L"BootType", type, ini.c_str()) &&
+              WritePrivateProfileStringW(kRecoverySection, L"SystemPath", path, ini.c_str());
     std::wstring o = std::wstring(opts) + L" /KERNEL=lntuprev.exe /HAL=lntuphal.dll /LNTUROLLBACK";
-    WritePrivateProfileStringW(kRecoverySection, L"Options", o.c_str(), ini.c_str());
+    ok = ok && WritePrivateProfileStringW(kRecoverySection, L"Options", o.c_str(), ini.c_str()) &&
+         WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
     SetFileAttributesW(ini.c_str(), attrs);
+    return ok;
 }
 
 /// Installs luupboot.exe into system32 and registers it in BootExecute after autochk.
@@ -296,6 +275,13 @@ std::wstring UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t ap
     std::wstring first;
     for (size_t i = applied; i-- > 0;) {
         std::wstring target = Target(cfg, ops[i]);
+        std::string have = FileExists(target) ? Sha256File(target) : "";
+        if (have == ops[i].oldSha) continue;
+        if (have != ops[i].newSha) {
+            if (!failed++) first = Widen(ops[i].path);
+            LogLine("undo conflict preserved: " + ops[i].path);
+            continue;
+        }
         BOOL ok = !ops[i].backup.empty() ? CopyFileW(ops[i].backup.c_str(), target.c_str(), FALSE)
                                          : (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND);
         if (ok && (ops[i].backup.empty() || Sha256File(target) == ops[i].oldSha)) continue;
@@ -327,7 +313,7 @@ bool VerifyTargets(const Config& cfg, const std::vector<Op>& ops, std::wstring& 
 
 void ClearBootFiles() {
     for (const wchar_t* f : {L"plan.txt", L"rollback.txt", L"plan.done", L"rollback.done", L"plan.cancelled", L"trial", L"result.txt",
-                             L"rolledback", L"plan.log", L"rollback.log"})
+                             L"rolledback", L"plan.log", L"rollback.log", L"applying", L"committed"})
         DeleteFileW(BootFile(f).c_str());
 }
 
@@ -350,11 +336,15 @@ bool WriteBootPlans(const Config& cfg, const std::vector<Op>& ops, std::wstring&
     std::wstring plan = L"LUUP 1\n", undo = L"LUUP 1\n";
     for (auto& o : ops) {
         std::wstring target = NtPath(Target(cfg, o));
-        plan += o.staged.empty() ? L"D\t" + target + L"\n" : L"M\t" + NtPath(o.staged) + L"\t" + target + L"\n";
+        std::wstring expected = o.backup.empty() ? L"-" : NtPath(o.backup);
+        plan += o.staged.empty() ? L"X\t" + target + L"\t" + expected + L"\n"
+                                : L"R\t" + NtPath(o.staged) + L"\t" + target + L"\t" + expected + L"\n";
     }
     for (size_t i = ops.size(); i-- > 0;) {
         std::wstring target = NtPath(Target(cfg, ops[i]));
-        undo += ops[i].backup.empty() ? L"D\t" + target + L"\n" : L"C\t" + NtPath(ops[i].backup) + L"\t" + target + L"\n";
+        std::wstring expected = ops[i].staged.empty() ? L"-" : NtPath(ops[i].staged);
+        undo += ops[i].backup.empty() ? L"X\t" + target + L"\t" + expected + L"\n"
+                                     : L"R\t" + NtPath(ops[i].backup) + L"\t" + target + L"\t" + expected + L"\n";
     }
     ClearBootFiles();
     // The plan goes last: its presence is what makes luupboot act.
@@ -376,6 +366,7 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
         if (InUse(t) && !IsClientFile(o.path)) { restart = true; break; }
     }
     txj["mode"] = restart ? "restart" : "direct";
+    txj["createdBoot"] = BootIdentity();
     if (!SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj)) {
         message = Tr(L"Nelze uložit stav připravené aktualizace.", L"The prepared update state cannot be saved.");
         return InstallOutcome::Failed;
@@ -395,6 +386,12 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
             return InstallOutcome::Failed;
         }
         if (restart) continue;
+        std::string current = FileExists(target) ? Sha256File(target) : "";
+        if (current != o.oldSha) {
+            message = L"Update target changed before replacement: " + Widen(o.path);
+            message += UndoDirect(cfg, ops, i, tx);
+            return InstallOutcome::Failed;
+        }
         // The running client: Windows lets a mapped exe be renamed, so it moves aside and the new one takes its name.
         std::wstring aside;
         if (!o.staged.empty() && IsClientFile(o.path) && InUse(target)) {
@@ -420,11 +417,11 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
     }
     if (restart) {
         // Nothing on disk has changed yet, so a failure here leaves the system as it was.
-        if ((g_dataOverride.empty() && !EnsureBootApplier(message)) || !WriteBootPlans(cfg, ops, message)) {
+        if ((g_dataOverride.empty() && (!EnsureBootApplier(message) || !AddRecoveryEntry(cfg))) || !WriteBootPlans(cfg, ops, message)) {
+            if (message.empty()) message = L"Cannot prepare the recovery boot entry.";
             LogLine("tx " + tx + ": cannot schedule the restart-time update: " + Narrow(message));
             return InstallOutcome::Failed;
         }
-        if (g_dataOverride.empty()) AddRecoveryEntry(cfg);
         return InstallOutcome::PendingRestart;
     }
 
@@ -440,7 +437,9 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
 }
 
 /// Keeps the transaction folders of the last few updates (their backups make rollback possible).
-void PruneTransactions(size_t keep) {
+void PruneTransactions(size_t keep, const std::string& protect = "") {
+    std::string guard = SelfUpdateGuardTransaction();
+    if (guard == "?") return;
     std::vector<std::wstring> dirs;
     WIN32_FIND_DATAW fd;
     HANDLE f = FindFirstFileW(JoinPath(JoinPath(DataDir(), L"tx"), L"*").c_str(), &fd);
@@ -452,7 +451,8 @@ void PruneTransactions(size_t keep) {
     std::sort(dirs.begin(), dirs.end());
     std::string pending = PendingTransaction();
     for (size_t i = 0; i + keep < dirs.size(); i++) {
-        if (Narrow(dirs[i]) == pending) continue;
+        std::string id = Narrow(dirs[i]);
+        if (id == pending || id == protect || id == guard) continue;
         std::wstring dir = JoinPath(JoinPath(DataDir(), L"tx"), dirs[i]);
         std::wstring from = dir + L'\0';
         SHFILEOPSTRUCTW op{};
@@ -480,10 +480,18 @@ void FinishHistory(json h, const std::string& result, const std::wstring& messag
 InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::vector<Op>& ops, json hist,
                      const std::string& releaseAfter, std::wstring& message, const Progress& progress) {
     message.clear();
+    txj["state"] = "applying";
+    json activeState = LoadState();
+    activeState["pending"] = tx;
+    if (!SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj) || !SaveState(activeState)) {
+        message = Tr(L"Nelze uložit aktivní transakci. Soubory nebyly změněny.", L"Cannot save the active transaction. No files were changed.");
+        return InstallOutcome::Failed;
+    }
     InstallOutcome r = ApplyTx(cfg, tx, txj, ops, message, progress);
     json state = LoadState();
     if (r == InstallOutcome::Installed) {
         txj["state"] = "done";
+        state["pending"] = "";
         state["installed"] = releaseAfter;
         if (message.empty()) message = Tr(L"Nahrazeno souborů: ", L"Files replaced: ") + std::to_wstring(ops.size()) + L".";
         FinishHistory(hist, "installed", message);
@@ -497,6 +505,16 @@ InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::v
         LogLine("tx " + tx + " pending restart");
     } else {
         txj["state"] = "failed";
+        state["pending"] = "";
+        if (txj.value("mode", "") == "direct") {
+            std::vector<Op> original = ops;
+            for (auto& op : original) op.newSha = op.oldSha;
+            std::wstring mismatch;
+            if (!VerifyTargets(cfg, original, mismatch)) {
+                state["pending"] = tx;
+                txj["state"] = "recovering";
+            }
+        }
         FinishHistory(hist, "failed", message);
     }
     bool savedTx = SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
@@ -509,9 +527,12 @@ InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::v
             RemoveRecoveryEntry(cfg);
         }
         state["installed"] = txj.value("installedBefore", "");
-        state["pending"] = "";
+        std::vector<Op> original = ops;
+        for (auto& op : original) op.newSha = op.oldSha;
+        std::wstring mismatch;
+        state["pending"] = VerifyTargets(cfg, original, mismatch) ? "" : tx;
         SaveState(state);
-        txj["state"] = "failed";
+        txj["state"] = state.value("pending", "").empty() ? "failed" : "recovering";
         SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
         message = persistence;
         FinishHistory(hist, "failed", message);
@@ -532,6 +553,7 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
     std::wstring dir = TxDir(tx);
     EnsureDirs(dir, false);
     std::vector<Op> ops;
+    size_t conflicts = 0;
     for (size_t i = old.size(); i-- > 0;) {
         Op o;
         o.path = old[i].path;
@@ -546,6 +568,7 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
         // Only what the update itself wrote is undone: a file that is neither the update's nor the original
         // (changed since, or another file mapped to the same name) is left alone instead of being deleted.
         if (have != o.oldSha) {
+            conflicts++;
             LogLine("tx " + tx + ": " + o.path + " (" + Narrow(target) + ") is not the file the update wrote (" +
                     (have.empty() ? std::string("missing") : have.substr(0, 16)) + "), left as it is");
             continue;
@@ -568,7 +591,7 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
         }
         ops.push_back(o);
     }
-    std::string releaseBefore = src.value("installedBefore", "");
+    std::string releaseBefore = conflicts ? "" : src.value("installedBefore", "");
     if (ops.empty()) {
         message = Tr(L"Žádný soubor už nelze bezpečně vrátit; systém zůstal beze změny.",
                      L"No file can be safely undone now; the system was left unchanged.");
@@ -576,9 +599,15 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
     }
     json txj{{"tx", tx}, {"kind", kind}, {"of", of}, {"release", releaseBefore}, {"installedBefore", LoadState().value("installed", "")},
              {"ops", OpsToJson(ops)}, {"state", "prepared"}};
+    txj["conflicts"] = conflicts;
     json hist = NewHistory(tx, kind, releaseBefore, ops.size());
     hist["of"] = of;
     InstallOutcome r = RunTx(cfg, tx, txj, ops, hist, releaseBefore, message, progress);
+    if (r == InstallOutcome::Installed && conflicts) {
+        message += Tr(L" Konfliktní soubory ponechány: ", L" Conflicting files kept: ") + std::to_wstring(conflicts) +
+                   Tr(L". Výchozí vydání nelze potvrdit.", L". The previous release cannot be confirmed.");
+        FinishHistory(hist, "partial-rollback", message);
+    }
     if (r == InstallOutcome::Installed || r == InstallOutcome::PendingRestart) {
         json orig = HistoryFor(of);
         if (!orig.empty()) { orig["rolledBackBy"] = tx; AddHistory(orig); }
@@ -587,6 +616,8 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
 }
 
 }  // namespace
+
+bool IsTestData() { return !g_dataOverride.empty(); }
 
 std::wstring DataDir() {
     if (!g_dataOverride.empty()) return g_dataOverride;
@@ -616,6 +647,8 @@ Config LoadConfig() {
     try {
         if (j.contains("feedUrl")) c.feedUrl = Widen(j["feedUrl"].get<std::string>());
         if (j.contains("root")) c.root = Widen(j["root"].get<std::string>());
+        if (j.contains("bootRoot")) c.bootRoot = Widen(j["bootRoot"].get<std::string>());
+        if (j.contains("baseRelease")) c.baseRelease = j["baseRelease"].get<std::string>();
         if (j.contains("auto")) c.autoMode = j["auto"].get<std::string>();
         if (j.contains("checkMinutes")) c.checkMinutes = std::max(1, j["checkMinutes"].get<int>());
         if (j.contains("restartHour")) c.restartHour = j["restartHour"].get<int>();
@@ -649,7 +682,17 @@ std::vector<HistoryEntry> LoadHistory() {
 }
 
 InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::wstring& message, const Progress& progress) {
+    UpdateLock operation(message);
+    if (!operation || !SecureUpdateData(message)) return InstallOutcome::Failed;
+    if (InstalledRelease() != check.installed) {
+        message = Tr(L"Stav systému se změnil. Zopakujte kontrolu.", L"The system state changed. Check for updates again.");
+        return InstallOutcome::Failed;
+    }
     if (!PendingTransaction().empty()) { message = Tr(L"Předchozí aktualizace čeká na restart.", L"The previous update waits for a restart."); return InstallOutcome::Failed; }
+    if (!SelfUpdateGuardTransaction().empty()) {
+        message = Tr(L"Předchozí aktualizaci klienta ještě ověřuje hlídač.", L"The previous client update is still being verified by its watchdog.");
+        return InstallOutcome::Failed;
+    }
     if (check.changes.empty()) { message = Tr(L"Systém už odpovídá vydání ", L"The system already matches release ") + Widen(check.latest.id) + L"."; return InstallOutcome::NothingToDo; }
     std::string tx = NewTxId("install");
     std::wstring dir = TxDir(tx);
@@ -658,6 +701,11 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
         return InstallOutcome::Failed;
     }
     json hist = NewHistory(tx, "install", check.latest.id, check.changes.size());
+    bool selfUpdate = false;
+    for (auto& change : check.changes)
+        if (IsClientFile(change.path) && _stricmp(change.path.substr(change.path.find_last_of('/') + 1).c_str(), "LiberNTUpdate.exe") == 0)
+            selfUpdate = true;
+    if (selfUpdate && !IsTestData()) SnapshotRunningClient();
     std::vector<Op> ops;
     uint64_t total = 0, done = 0;
     for (auto& c : check.changes) total += c.size;
@@ -669,7 +717,9 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
             if (progress) progress((int)(60 * done / std::max<uint64_t>(total, 1)), Tr(L"Stahuji ", L"Downloading ") + Widen(c.path));
             std::vector<uint8_t> data;
             std::wstring err;
-            if (!Fetch(cfg, "objects/" + c.newSha.substr(0, 2) + "/" + c.newSha, data, err) || Sha256Hex(data.data(), data.size()) != c.newSha) {
+            if (c.size > 512u * 1024u * 1024u ||
+                !Fetch(cfg, "objects/" + c.newSha.substr(0, 2) + "/" + c.newSha, data, err, (size_t)c.size) ||
+                data.size() != c.size || Sha256Hex(data.data(), data.size()) != c.newSha) {
                 message = Tr(L"Stažení ", L"Download of ") + Widen(c.path) + Tr(L" selhalo: ", L" failed: ") +
                           (err.empty() ? std::wstring(Tr(L"obsah nesouhlasí s manifestem", L"the contents do not match the manifest")) : err);
                 FinishHistory(hist, "failed", message);
@@ -683,6 +733,7 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
         }
         done += c.size;
         std::wstring target = TargetPath(cfg, c.path);
+        if (target.empty()) { message = L"Cannot identify update target: " + Widen(c.path); return InstallOutcome::Failed; }
         o.target = target;
         if (FileExists(target)) {
             o.backup = JoinPath(dir, L"backup\\" + std::to_wstring(i) + L".bin");
@@ -692,7 +743,12 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
                 return InstallOutcome::Failed;
             }
             o.oldSha = Sha256File(o.backup);
+            if (o.oldSha.empty() || o.oldSha != c.oldSha) {
+                message = Tr(L"Soubor se od kontroly změnil. Zopakujte kontrolu: ", L"The file changed since the check. Check again: ") + Widen(c.path);
+                return InstallOutcome::Failed;
+            }
         } else {
+            if (!c.oldSha.empty()) { message = L"Update target disappeared after the check: " + Widen(c.path); return InstallOutcome::Failed; }
             o.oldSha.clear();
         }
         ops.push_back(o);
@@ -704,88 +760,28 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
         FinishHistory(hist, "failed", message);
         return InstallOutcome::Failed;
     }
+    if (selfUpdate && !IsTestData() && !RegisterSelfUpdateGuard(tx, message)) return InstallOutcome::Failed;
     InstallOutcome r = RunTx(cfg, tx, txj, ops, hist, check.latest.id, message, progress);
-    if (r == InstallOutcome::Installed) PruneTransactions(5);
+    if (r == InstallOutcome::Failed && selfUpdate && !IsTestData() && PendingTransaction().empty()) RemoveSelfUpdateGuard(tx);
+    if (r == InstallOutcome::Installed && selfUpdate && !IsTestData()) {
+        g_selfUpdateStarted = StartSelfUpdateWatchdog(tx);
+        if (!g_selfUpdateStarted) {
+            std::wstring rollback;
+            RevertTx(cfg, tx, "auto-rollback", rollback, nullptr);
+            message = L"Self-update watchdog could not start. " + rollback;
+            return InstallOutcome::Failed;
+        }
+    }
+    if (r == InstallOutcome::Installed) PruneTransactions(5, tx);
     return r;
 }
 
-bool FinalizePending(const Config& cfg, std::wstring& message) {
-    std::string tx = PendingTransaction();
-    if (tx.empty()) return false;
-    json txj = LoadJson(JoinPath(TxDir(tx), L"tx.json"), json::object());
-    std::vector<Op> ops = OpsFromJson(txj.value("ops", json::array()));
-    json hist = HistoryFor(tx);
-    if (hist.empty()) hist = NewHistory(tx, txj.value("kind", "install"), txj.value("release", ""), ops.size());
-    json state = LoadState();
-    state["pending"] = "";
-    std::vector<uint8_t> raw;
-    std::string bootResult = ReadFileBytes(BootFile(L"result.txt"), raw) ? Trim(std::string(raw.begin(), raw.end())) : "";
-    if (!bootResult.empty()) LogLine("luupboot: " + bootResult);
-    LogBootFailures();
+#include "lifecycle.inc"
 
-    auto finish = [&](const char* txState, const char* result, const std::wstring& text, const std::string& installed) {
-        state["installed"] = installed;
-        SaveState(state);
-        txj["state"] = txState;
-        SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
-        message = text;
-        FinishHistory(hist, result, message);
-        RemoveRecoveryEntry(cfg);
-    };
-    std::string before = txj.value("installedBefore", state.value("installed", ""));
-    if (FileExists(BootFile(L"plan.txt"))) {
-        ClearBootFiles();
-        finish("failed", "failed", Tr(L"Program luupboot při startu neběžel, aktualizace ", L"luupboot did not run at boot; update ") + Widen(tx) + Tr(L" se neprovedla.", L" was not applied."), before);
-        return true;
-    }
-    if (ReadFileBytes(BootFile(L"rolledback"), raw)) {
-        bool cancelled = std::string(raw.begin(), raw.end()).rfind("cancelled", 0) == 0;
-        ClearBootFiles();
-        if (cancelled)
-            finish("cancelled", "cancelled", Tr(L"Při startu byla zvolena položka pro návrat, aktualizace ", L"The undo entry was chosen at boot; update ") + Widen(tx) + Tr(L" se neprovedla.", L" was not applied."), before);
-        else
-            finish("rolled-back", "failed", Tr(L"Systém se po aktualizaci ", L"The system did not start after update ") + Widen(tx) +
-                   Tr(L" nespustil, při startu jsou vrácené původní soubory.", L"; the previous files were restored at boot."), before);
-        return true;
-    }
-
-    std::wstring bad;
-    if (!ops.empty() && VerifyTargets(cfg, ops, bad)) {
-        ClearBootFiles();
-        finish("done", "installed", Tr(L"Aktualizace ", L"Update ") + Widen(tx) + Tr(L" dokončena po restartu (souborů: ", L" finished after the restart (files: ") +
-                   std::to_wstring(ops.size()) + L").",
-               txj.value("release", ""));
-        PruneTransactions(5);
-        return true;
-    }
-    ClearBootFiles();
-    finish("failed", "failed", Tr(L"Po restartu nesouhlasí ", L"After the restart this does not match: ") + bad + Tr(L"; vracím původní soubory.", L"; restoring the previous files."), before);
-    std::wstring rb;
-    InstallOutcome r = RevertTx(cfg, tx, "auto-rollback", rb, nullptr);
-    message += L" " + rb;
-    if (r == InstallOutcome::PendingRestart && g_dataOverride.empty()) RestartSystem(rb);
-    return true;
-}
-
-bool CancelPending(std::wstring& message) {
-    std::string tx = PendingTransaction();
-    if (tx.empty()) { message = Tr(L"Žádná aktualizace nečeká na restart.", L"No update waits for a restart."); return false; }
-    json txj = LoadJson(JoinPath(TxDir(tx), L"tx.json"), json::object());
-    Config cfg = LoadConfig();
-    ClearBootFiles();
-    RemoveRecoveryEntry(cfg);
-    json state = LoadState();
-    state["pending"] = "";
-    SaveState(state);
-    txj["state"] = "cancelled";
-    SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj);
-    json hist = HistoryFor(tx);
-    message = Tr(L"Čekající aktualizace ", L"Pending update ") + Widen(tx) + Tr(L" je zrušená; systém zůstává beze změny.", L" is cancelled; the system stays as it is.");
-    if (!hist.empty()) FinishHistory(hist, "cancelled", message);
-    return true;
-}
 
 InstallOutcome RollbackLast(const Config& cfg, std::wstring& message, const Progress& progress) {
+    UpdateLock operation(message);
+    if (!operation || !SecureUpdateData(message)) return InstallOutcome::Failed;
     if (!PendingTransaction().empty()) { message = Tr(L"Nejdřív je potřeba restartovat kvůli čekající aktualizaci.", L"Restart first: an update is waiting for it."); return InstallOutcome::Failed; }
     auto history = LoadJson(JoinPath(DataDir(), L"history.json"), json::array());
     for (size_t i = history.size(); i-- > 0;) {
@@ -838,106 +834,8 @@ Status LoadStatus() {
 #endif
 const char* ClientVersion() { return LNTU_VERSION; }
 
-std::wstring g_watchdogExe;  // snapshot of the running client, see SnapshotRunningClient
+#include "self_update.inc"
 
-std::wstring WatchdogExe() { return g_watchdogExe; }
-
-void SnapshotRunningClient() {
-    // Called first thing at service start, while the exe on disk is still the image this process runs. The name
-    // carries the hash, so a watchdog still running from an older snapshot never blocks the copy.
-    std::wstring dir = JoinPath(DataDir(), L"watchdog");
-    std::string sha = Sha256File(OwnExe());
-    std::wstring exe = JoinPath(dir, Widen(sha.substr(0, 16)) + L".exe");
-    EnsureDirs(exe, true);
-    if (Sha256File(exe) != sha && !CopyFileW(OwnExe().c_str(), exe.c_str(), FALSE)) {
-        LogLine("service: cannot copy the running client to " + Narrow(exe) + ": " + Narrow(LastErrorText(GetLastError())));
-        return;
-    }
-    g_watchdogExe = exe;
-    WIN32_FIND_DATAW fd;
-    HANDLE f = FindFirstFileW(JoinPath(dir, L"*.exe").c_str(), &fd);
-    if (f == INVALID_HANDLE_VALUE) return;
-    do {
-        std::wstring p = JoinPath(dir, fd.cFileName);
-        if (_wcsicmp(p.c_str(), exe.c_str()) != 0) DeleteFileW(p.c_str());  // one still running stays until next time
-    } while (FindNextFileW(f, &fd));
-    FindClose(f);
-}
-
-void ServiceHousekeeping() {
-    std::wstring exe = OwnExe(), dir = exe.substr(0, exe.find_last_of(L'\\'));
-    WIN32_FIND_DATAW fd;
-    HANDLE f = FindFirstFileW(JoinPath(dir, L"*.old-*").c_str(), &fd);
-    if (f != INVALID_HANDLE_VALUE) {
-        do {
-            std::wstring p = JoinPath(dir, fd.cFileName);
-            LogLine("housekeeping: " + Narrow(p) + (DeleteFileW(p.c_str()) ? " removed" : " still in use"));
-        } while (FindNextFileW(f, &fd));
-        FindClose(f);
-    }
-    std::wstring err;
-    if (!EnsureBootApplier(err)) LogLine("housekeeping: luupboot: " + Narrow(err));
-}
-
-/// Stops the service if it runs, starts it again and requires it to stay running for 30 s.
-bool RestartService(std::wstring& error) {
-    SC_HANDLE scm = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
-    SC_HANDLE svc = scm ? OpenServiceW(scm, kServiceName, SERVICE_QUERY_STATUS | SERVICE_START | SERVICE_STOP) : nullptr;
-    bool ok = false;
-    if (!svc) {
-        error = Tr(L"Službu LiberNTUpdate nelze otevřít: ", L"Cannot open service LiberNTUpdate: ") + LastErrorText(GetLastError());
-    } else {
-        SERVICE_STATUS s{};
-        if (QueryServiceStatus(svc, &s) && s.dwCurrentState == SERVICE_RUNNING) ControlService(svc, SERVICE_CONTROL_STOP, &s);
-        for (int i = 0; i < 120 && QueryServiceStatus(svc, &s) && s.dwCurrentState != SERVICE_STOPPED; i++) Sleep(500);
-        if (!StartServiceW(svc, 0, nullptr)) {
-            error = Tr(L"Službu LiberNTUpdate nelze spustit: ", L"Cannot start service LiberNTUpdate: ") + LastErrorText(GetLastError());
-        } else {
-            ok = true;
-            for (int i = 0; ok && i < 30; i++) {
-                Sleep(1000);
-                ok = QueryServiceStatus(svc, &s) && (s.dwCurrentState == SERVICE_RUNNING || s.dwCurrentState == SERVICE_START_PENDING);
-            }
-            if (!ok) error = Tr(L"Služba LiberNTUpdate po spuštění skončila (stav ", L"Service LiberNTUpdate stopped after the start (state ") +
-                             std::to_wstring(s.dwCurrentState) + Tr(L", kód ", L", code ") +
-                             std::to_wstring(s.dwWin32ExitCode) + L").";
-        }
-    }
-    LogLine(ok ? "service restarted and running for 30 s" : "service restart failed: " + Narrow(error));
-    if (svc) CloseServiceHandle(svc);
-    if (scm) CloseServiceHandle(scm);
-    return ok;
-}
-
-/// Runs from the previous client's exe (moved aside by a self-update): restarts the service with the new client and
-/// rolls the update back when the new client does not keep the service running.
-bool WatchSelfUpdate(const std::string& tx) {
-    LogLine(std::string("self-update watchdog (client ") + ClientVersion() + ") for tx " + tx);
-    std::wstring err;
-    if (RestartService(err)) return true;
-    std::wstring msg;
-    InstallOutcome r = RevertTx(LoadConfig(), tx, "auto-rollback", msg, nullptr);
-    LogLine("self-update failed, rollback of " + tx + ": " + Narrow(msg));
-    RestartService(err);
-    return r == InstallOutcome::Installed;
-}
-
-/// After a self-update in the service: the copy of the code that is running now (made at service start, see
-/// SnapshotRunningClient) restarts the service with the new client and undoes the update if that fails.
-bool StartSelfUpdateWatchdog(const std::string& tx) {
-    std::wstring exe = WatchdogExe();
-    std::wstring cmd = L"\"" + exe + L"\" /watch-self-update " + Widen(tx);
-    STARTUPINFOW si{sizeof si};
-    PROCESS_INFORMATION pi{};
-    if (exe.empty() || !FileExists(exe) ||
-        !CreateProcessW(exe.c_str(), &cmd[0], nullptr, nullptr, FALSE, DETACHED_PROCESS, nullptr, nullptr, &si, &pi)) {
-        LogLine("self-update: cannot start the watchdog " + Narrow(exe) + ": " + Narrow(LastErrorText(GetLastError())));
-        return false;
-    }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return true;
-}
 
 void RunAutomatic(void* stopEvent) {
     std::wstring statusPath = JoinPath(DataDir(), L"status.json");
@@ -952,7 +850,6 @@ void RunAutomatic(void* stopEvent) {
             bool ok = CheckForUpdate(cfg, c, err, nullptr);
             st = json{{"checkedEpoch", now}, {"checked", NowIso()}, {"latest", c.latest.id}, {"changes", ok ? (int)c.changes.size() : 0},
                       {"error", Narrow(err)}};
-            std::string selfTx;
             // A release that failed or was rolled back on this machine is not retried automatically; a person
             // decides (window or /install), otherwise a broken release would be installed and undone forever.
             bool failedHere = false;
@@ -965,15 +862,13 @@ void RunAutomatic(void* stopEvent) {
                 LogLine("auto: " + st["error"].get<std::string>());
             }
             if (ok && !c.changes.empty() && cfg.autoMode == "install" && !failedHere) {
-                std::string before = Sha256File(OwnExe());
                 InstallOutcome r = InstallUpdate(cfg, c, msg, nullptr);
                 LogLine("auto install " + c.latest.id + ": " + Narrow(msg));
                 if (r == InstallOutcome::Installed) st["changes"] = 0;
                 if (r == InstallOutcome::Failed) st["error"] = Narrow(msg);
-                if (r == InstallOutcome::Installed && Sha256File(OwnExe()) != before && !LoadHistory().empty()) selfTx = LoadHistory().front().tx;
             }
             SaveJson(statusPath, st);
-            if (!selfTx.empty() && StartSelfUpdateWatchdog(selfTx)) {
+            if (g_selfUpdateStarted) {
                 LogLine("self-update: service stops, the watchdog starts the new client");
                 return;
             }
@@ -992,6 +887,7 @@ void RunAutomatic(void* stopEvent) {
 }
 
 bool RegisterAutomatic(std::wstring& error) {
+    if (!SecureUpdateData(error)) return false;
     if (!EnsureFinalizeService(error)) return false;
     wchar_t exe[MAX_PATH];
     GetModuleFileNameW(nullptr, exe, MAX_PATH);
@@ -1022,273 +918,4 @@ bool RestartSystem(std::wstring& error) {
     return false;
 }
 
-bool SelfTest(std::wstring& report) {
-    bool ok = true;
-    auto check = [&](bool cond, const std::wstring& what) {
-        report += (cond ? L"PASS " : L"FAIL ") + what + L"\r\n";
-        ok = ok && cond;
-    };
-    check(Sha256Hex("", 0) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", L"SHA-256 empty");
-    check(Sha256Hex("abc", 3) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", L"SHA-256 abc");
-    std::string million(1000000, 'a');
-    check(Sha256Hex(million.data(), million.size()) == "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0", L"SHA-256 1M x a");
-
-    // RFC 8032, Ed25519 test 1 (empty message).
-    std::vector<uint8_t> pub, sig;
-    HexToBytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a", pub);
-    HexToBytes("e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b", sig);
-    check(crypto_ed25519_check(sig.data(), pub.data(), nullptr, 0) == 0, L"Ed25519 RFC 8032 vector");
-    sig[0] ^= 1;
-    check(crypto_ed25519_check(sig.data(), pub.data(), nullptr, 0) != 0, L"Ed25519 rejects a damaged signature");
-
-    // Transaction logic against a scratch system drive and a file:/// feed.
-    wchar_t tmp[MAX_PATH];
-    GetTempPathW(MAX_PATH, tmp);
-    std::wstring base = JoinPath(tmp, L"lntu-selftest-" + Widen(NowId()));
-    std::wstring root = JoinPath(base, L"root"), feed = JoinPath(base, L"feed");
-    g_dataOverride = JoinPath(base, L"data");
-    Config cfg{L"file:///" + feed + L"\\", root};
-    std::replace(cfg.feedUrl.begin(), cfg.feedUrl.end(), L'\\', L'/');
-    auto put = [](const std::wstring& path, const std::string& text) { return WriteTextAtomic(path, text); };
-    auto obj = [&](const std::string& text) {
-        std::string sha = Sha256Hex(text.data(), text.size());
-        put(JoinPath(feed, L"objects\\" + Widen(sha.substr(0, 2)) + L"\\" + Widen(sha)), text);
-        return sha;
-    };
-    put(JoinPath(root, L"Windows\\system32\\old.dll"), "old");
-    put(JoinPath(root, L"Windows\\system32\\keep.dll"), "keep");
-    CheckResult c;
-    c.latest.id = "R2";
-    c.changes = {{"Windows/system32/old.dll", obj("new contents"), 12, Sha256Hex("old", 3)},
-                 {"Windows/system32/added.dll", obj("added"), 5, ""}};
-    std::wstring msg;
-    InstallOutcome r = InstallUpdate(cfg, c, msg, nullptr);
-    check(r == InstallOutcome::Installed, L"direct install: " + msg);
-    std::vector<uint8_t> b;
-    check(ReadFileBytes(JoinPath(root, L"Windows\\system32\\old.dll"), b) && std::string(b.begin(), b.end()) == "new contents",
-          L"replaced file has the new contents");
-    check(FileExists(JoinPath(root, L"Windows\\system32\\added.dll")), L"new file created");
-    check(InstalledRelease() == "R2", L"state records release R2");
-
-    r = RollbackLast(cfg, msg, nullptr);
-    check(r == InstallOutcome::Installed, L"rollback: " + msg);
-    check(ReadFileBytes(JoinPath(root, L"Windows\\system32\\old.dll"), b) && std::string(b.begin(), b.end()) == "old",
-          L"rollback restored the old file");
-    check(!FileExists(JoinPath(root, L"Windows\\system32\\added.dll")), L"rollback removed the added file");
-
-    // An update that reached only some files: the rollback restores just those.
-    r = InstallUpdate(cfg, c, msg, nullptr);
-    check(r == InstallOutcome::Installed, L"second install: " + msg);
-    put(JoinPath(root, L"Windows\\system32\\old.dll"), "old");
-    r = RollbackLast(cfg, msg, nullptr);
-    check(r == InstallOutcome::Installed && msg == std::wstring(Tr(L"Nahrazeno souborů: ", L"Files replaced: ")) + L"1." &&
-              !FileExists(JoinPath(root, L"Windows\\system32\\added.dll")),
-          L"partial update: rollback touches only the changed file: " + msg);
-
-    // A file someone else replaced after the update is neither ours nor the original: rollback leaves it alone.
-    r = InstallUpdate(cfg, c, msg, nullptr);
-    put(JoinPath(root, L"Windows\\system32\\added.dll"), "edited by the user");
-    r = RollbackLast(cfg, msg, nullptr);
-    check(ReadFileBytes(JoinPath(root, L"Windows\\system32\\added.dll"), b) && std::string(b.begin(), b.end()) == "edited by the user" &&
-              ReadFileBytes(JoinPath(root, L"Windows\\system32\\old.dll"), b) && std::string(b.begin(), b.end()) == "old",
-          L"rollback keeps a file changed after the update: " + msg);
-    DeleteFileW(JoinPath(root, L"Windows\\system32\\added.dll").c_str());
-
-    // A file in use forces the restart path: luupboot's code applies the plan in-process here, as at boot.
-    std::wstring keep = JoinPath(root, L"Windows\\system32\\keep.dll"), extra = JoinPath(root, L"Windows\\system32\\extra.dll");
-    auto content = [&](const std::wstring& p) { return ReadFileBytes(p, b) ? std::string(b.begin(), b.end()) : std::string("<missing>"); };
-    auto installLocked = [&](const std::string& id, const std::string& text) {
-        HANDLE lock = CreateFileW(keep.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-        CheckResult cr;
-        cr.latest.id = id;
-        cr.changes = {{"Windows/system32/keep.dll", obj(text), text.size(), Sha256File(keep)},
-                      {"Windows/system32/extra.dll", obj(id), id.size(), FileExists(extra) ? Sha256File(extra) : ""}};
-        InstallOutcome res = InstallUpdate(cfg, cr, msg, nullptr);
-        if (lock != INVALID_HANDLE_VALUE) CloseHandle(lock);
-        return res;
-    };
-    std::wstring dataNt = NtPath(DataDir());
-    r = installLocked("R3", "keep v2");
-    check(r == InstallOutcome::PendingRestart && FileExists(BootFile(L"plan.txt")) && content(keep) == "keep",
-          L"restart path: plan written, files untouched: " + msg);
-    LuupBoot(dataNt.c_str(), FALSE, nullptr);
-    check(content(keep) == "keep v2" && content(extra) == "R3" && FileExists(BootFile(L"trial")), L"boot applies the plan");
-    check(FinalizePending(cfg, msg) && InstalledRelease() == "R3" && !FileExists(BootFile(L"trial")), L"service confirms the update");
-
-    r = installLocked("R4", "keep v3");
-    LuupBoot(dataNt.c_str(), FALSE, nullptr);
-    LuupBoot(dataNt.c_str(), FALSE, nullptr);  // second boot without the service: still waiting
-    check(content(keep) == "keep v3", L"one unconfirmed boot keeps the update");
-    LuupBoot(dataNt.c_str(), FALSE, nullptr);  // third boot without the service: roll back
-    check(content(keep) == "keep v2" && content(extra) == "R3", L"third unconfirmed boot rolls back");
-    check(FinalizePending(cfg, msg) && InstalledRelease() == "R3", L"service records the boot rollback");
-
-    r = installLocked("R5", "keep v4");
-    LuupBoot(dataNt.c_str(), TRUE, nullptr);  // recovery entry chosen before the plan ran
-    check(content(keep) == "keep v2" && FinalizePending(cfg, msg) && InstalledRelease() == "R3", L"recovery boot cancels a pending plan");
-
-    r = installLocked("R6", "keep v5");
-    LuupBoot(dataNt.c_str(), FALSE, nullptr);
-    LuupBoot(dataNt.c_str(), TRUE, nullptr);  // recovery entry chosen after the plan ran
-    check(content(keep) == "keep v2" && content(extra) == "R3" && FinalizePending(cfg, msg), L"recovery boot rolls back an applied plan");
-
-    r = installLocked("R7", "keep v6");
-    check(r == InstallOutcome::PendingRestart && CancelPending(msg) && !FileExists(BootFile(L"plan.txt")) && PendingTransaction().empty(),
-          L"/cancel drops the plan");
-    check(LoadHistory().size() >= 3, L"history has the transactions");
-
-    // A partial boot rollback stays pending, preserves its sources and can finish on the next boot.
-    std::wstring retryBackup1 = JoinPath(base, L"retry-backup-1.bin");
-    std::wstring retryBackup2 = JoinPath(base, L"retry-backup-2.bin");
-    std::wstring retryTarget1 = JoinPath(base, L"retry-target-1.bin");
-    std::wstring retryTarget2 = JoinPath(base, L"retry-target-2.bin");
-    put(retryBackup1, "old-1");
-    put(retryTarget1, "new-1");
-    put(retryTarget2, "new-2");
-    DeleteFileW(retryBackup2.c_str());
-    WriteUtf16(BootFile(L"rollback.txt"), L"LUUP 1\nC\t" + NtPath(retryBackup1) + L"\t" + NtPath(retryTarget1) +
-                                                  L"\nC\t" + NtPath(retryBackup2) + L"\t" + NtPath(retryTarget2) + L"\n");
-    WriteTextAtomic(BootFile(L"trial"), "2");
-    NTSTATUS failedRollback = LuupBoot(dataNt.c_str(), TRUE, nullptr);
-    check(!NT_SUCCESS(failedRollback) && FileExists(BootFile(L"rollback.txt")) && FileExists(BootFile(L"trial")) &&
-              !FileExists(BootFile(L"rolledback")) && content(retryTarget1) == "old-1" && content(retryTarget2) == "new-2" &&
-              FileExists(retryBackup1),
-          L"partial boot rollback stays pending and keeps its source");
-    put(retryBackup2, "old-2");
-    NTSTATUS retriedRollback = LuupBoot(dataNt.c_str(), TRUE, nullptr);
-    check(NT_SUCCESS(retriedRollback) && !FileExists(BootFile(L"rollback.txt")) && !FileExists(BootFile(L"trial")) &&
-              FileExists(BootFile(L"rolledback")) && content(retryTarget1) == "old-1" && content(retryTarget2) == "old-2" &&
-              FileExists(retryBackup1) && FileExists(retryBackup2),
-          L"boot rollback finishes safely on retry");
-    ClearBootFiles();
-
-    // Full check against a signed file:/// feed: MP kernel variant, a file Setup left out, a new file.
-    {
-        std::vector<uint8_t> seed, sk(64), pk(32), sigb(64);
-        HexToBytes("9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60", seed);
-        crypto_ed25519_key_pair(sk.data(), pk.data(), seed.data());
-        static const char* hexd = "0123456789abcdef";
-        std::string pkhex;
-        for (uint8_t v : pk) { pkhex += hexd[v >> 4]; pkhex += hexd[v & 15]; }
-        SetFeedTestPublicKey(pkhex);
-        long long sequence = 0;
-        auto manifest = [&](const std::string& id, const std::vector<std::pair<std::string, std::string>>& fl) {
-            json m{{"id", id}, {"commit", id}, {"date", "2026-01-01T00:00:00Z"}, {"files", json::array()},
-                   {"aliases", json::array({json{{"path", "Windows/system32/ntoskrnl.exe"},
-                                                 {"candidates", {"Windows/system32/ntoskrnl.exe", "Windows/system32/ntkrnlmp.exe"}}}})}};
-            for (auto& [p, content] : fl) m["files"].push_back({{"path", p}, {"sha256", obj(content)}, {"size", content.size()}});
-            std::string raw = m.dump(1);
-            put(JoinPath(feed, L"releases\\" + Widen(id) + L"\\manifest.json"), raw);
-            return json{{"sequence", ++sequence}, {"id", id}, {"commit", id}, {"date", "2026-01-01T00:00:00Z"}, {"manifest", "releases/" + id + "/manifest.json"},
-                        {"manifestSha256", Sha256Hex(raw.data(), raw.size())}, {"notes", json::array({"test"})}};
-        };
-        json f{{"product", "LiberNT"}, {"format", 1}, {"releases", json::array()}};
-        f["releases"].push_back(manifest("V1", {{"Windows/system32/ntoskrnl.exe", "UP1"}, {"Windows/system32/ntkrnlmp.exe", "MP1"},
-                                                {"Windows/system32/a.dll", "A1"}, {"Windows/system32/opt.exe", "OPT"},
-                                                {"Windows/system32/optional.exe", "OPTIONAL"}}));
-        f["releases"].push_back(manifest("V2", {{"Windows/system32/ntoskrnl.exe", "UP2"}, {"Windows/system32/ntkrnlmp.exe", "MP2"},
-                                                {"Windows/system32/a.dll", "A2"}, {"Windows/system32/optional.exe", "OPTIONAL"},
-                                                {"Windows/system32/new.dll", "NEW"}}));
-        auto writeSignedFeed = [&](const json& value) {
-            std::string raw = value.dump(1);
-            put(JoinPath(feed, L"feed.json"), raw);
-            crypto_ed25519_sign(sigb.data(), sk.data(), (const uint8_t*)raw.data(), raw.size());
-            std::string sighex;
-            for (uint8_t v : sigb) { sighex += hexd[v >> 4]; sighex += hexd[v & 15]; }
-            put(JoinPath(feed, L"feed.json.sig"), sighex);
-            return raw;
-        };
-        std::string fraw = writeSignedFeed(f);
-
-        std::wstring root2 = JoinPath(base, L"root2");
-        put(JoinPath(root2, L"Windows\\system32\\ntoskrnl.exe"), "MP1");  // Setup installed the MP kernel
-        put(JoinPath(root2, L"Windows\\system32\\ntkrnlmp.exe"), "MP1");
-        put(JoinPath(root2, L"Windows\\system32\\a.dll"), "A1");
-        put(JoinPath(root2, L"Windows\\system32\\opt.exe"), "OPT");
-        Config cfg2{cfg.feedUrl, root2};
-        json st = LoadState();
-        st["installed"] = "";
-        SaveState(st);
-        CheckResult cr;
-        std::wstring err;
-        bool got = CheckForUpdate(cfg2, cr, err, nullptr);
-        check(got, L"signed feed accepted: " + err);
-        std::map<std::string, std::string> ch;
-        for (auto& x : cr.changes) ch[x.path] = x.newSha;
-        check(cr.changes.size() == 5, L"5 changes found, including one removal (got " + std::to_wstring(cr.changes.size()) + L")");
-        check(ch["Windows/system32/ntoskrnl.exe"] == Sha256Hex("MP2", 3), L"kernel keeps the MP variant");
-        check(!ch.count("Windows/system32/optional.exe"), L"file left out by Setup is not added");
-        check(ch.count("Windows/system32/new.dll") == 1, L"file new in the release is added");
-        check(ch.count("Windows/system32/opt.exe") == 1 && ch["Windows/system32/opt.exe"].empty(), L"file removed from the release is removed safely");
-        InstallOutcome r2 = InstallUpdate(cfg2, cr, msg, nullptr);
-        check(r2 == InstallOutcome::Installed && ReadFileBytes(JoinPath(root2, L"Windows\\system32\\ntoskrnl.exe"), b) &&
-                  std::string(b.begin(), b.end()) == "MP2",
-              L"installed kernel is the new MP kernel");
-        check(!FileExists(JoinPath(root2, L"Windows\\system32\\opt.exe")), L"removed file no longer exists");
-        CheckResult again;
-        CheckForUpdate(cfg2, again, err, nullptr);
-        check(again.changes.empty(), L"second check finds nothing to do");
-
-        json replay = f;
-        replay["releases"].erase(replay["releases"].begin() + 1);
-        writeSignedFeed(replay);
-        check(!CheckForUpdate(cfg2, again, err, nullptr), L"older but validly signed feed is rejected");
-        json legacyReplay = replay;
-        for (auto& release : legacyReplay["releases"]) release.erase("sequence");
-        json legacyState = LoadState();
-        legacyState["feedSequence"] = 0;
-        legacyState["feedRelease"] = "V2";
-        SaveState(legacyState);
-        writeSignedFeed(legacyReplay);
-        check(!CheckForUpdate(cfg2, again, err, nullptr), L"older legacy feed without a sequence is rejected");
-        legacyState["feedSequence"] = 2;
-        SaveState(legacyState);
-        writeSignedFeed(f);
-
-        std::wstring latestManifestPath = JoinPath(feed, L"releases\\V2\\manifest.json");
-        std::vector<uint8_t> validManifestRaw;
-        ReadFileBytes(latestManifestPath, validManifestRaw);
-        json invalidManifest = json::parse(validManifestRaw.begin(), validManifestRaw.end());
-        invalidManifest["files"][0]["sha256"] = std::string(64, 'g');
-        std::string invalidManifestRaw = invalidManifest.dump(1);
-        put(latestManifestPath, invalidManifestRaw);
-        json invalidFeed = f;
-        invalidFeed["releases"][1]["manifestSha256"] = Sha256Hex(invalidManifestRaw.data(), invalidManifestRaw.size());
-        writeSignedFeed(invalidFeed);
-        check(!CheckForUpdate(cfg2, again, err, nullptr), L"signed manifest with a non-hex digest is rejected");
-
-        invalidManifest = json::parse(validManifestRaw.begin(), validManifestRaw.end());
-        invalidManifest["files"].push_back(invalidManifest["files"][0]);
-        invalidManifestRaw = invalidManifest.dump(1);
-        put(latestManifestPath, invalidManifestRaw);
-        invalidFeed = f;
-        invalidFeed["releases"][1]["manifestSha256"] = Sha256Hex(invalidManifestRaw.data(), invalidManifestRaw.size());
-        writeSignedFeed(invalidFeed);
-        check(!CheckForUpdate(cfg2, again, err, nullptr), L"signed manifest with a duplicate path is rejected");
-        WriteFileAtomic(latestManifestPath, validManifestRaw.data(), validManifestRaw.size());
-        writeSignedFeed(f);
-
-        // The new MP kernel copied over ntoskrnl.exe by hand stays; it is not swapped for the UP one.
-        std::wstring root3 = JoinPath(base, L"root3");
-        put(JoinPath(root3, L"Windows\\system32\\ntoskrnl.exe"), "MP2");
-        put(JoinPath(root3, L"Windows\\system32\\ntkrnlmp.exe"), "MP1");
-        CheckResult hand;
-        CheckForUpdate(Config{cfg.feedUrl, root3}, hand, err, nullptr);
-        bool kernelTouched = false;
-        for (auto& x : hand.changes) kernelTouched = kernelTouched || x.path == "Windows/system32/ntoskrnl.exe";
-        check(!kernelTouched, L"kernel already at the new MP version is kept");
-        put(JoinPath(feed, L"feed.json"), fraw + " ");
-        check(!CheckForUpdate(cfg2, again, err, nullptr), L"tampered feed rejected");
-        SetFeedTestPublicKey("");
-    }
-
-    g_dataOverride.clear();
-    std::wstring from = base + L'\0';
-    SHFILEOPSTRUCTW op{};
-    op.wFunc = FO_DELETE;
-    op.pFrom = from.c_str();
-    op.fFlags = FOF_NO_UI;
-    SHFileOperationW(&op);
-    report += ok ? L"RESULT PASS\r\n" : L"RESULT FAIL\r\n";
-    return ok;
-}
+#include "engine_tests.inc"
