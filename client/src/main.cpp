@@ -129,6 +129,8 @@ int Cli(const std::wstring& cmd) {
         Out(L"latest:    " + Widen(c.latest.id) + L" commit " + Widen(c.latest.commit));
         if (!c.pendingTx.empty()) Out(L"pending:   " + Widen(c.pendingTx) + L" (restart needed)");
         Out(L"changed:   " + std::to_wstring(c.changes.size()) + L" files");
+        Out(L"registry:  " + std::to_wstring(c.registryChanges.size()) + L" changes, " + std::to_wstring(c.registryPreserved) + L" local changes preserved");
+        for (auto& change : c.registryChanges) Out(L"  registry " + RegistryDisplayName(change.after));
         for (auto& ch : c.changes)
             Out((ch.newSha.empty() ? L"  removed " : ch.oldSha.empty() ? L"  new     " : L"  changed ") + Widen(ch.path) + L"  " + Widen(ch.oldSha.substr(0, 12)) + L" -> " +
                 Widen(ch.newSha.substr(0, 12)));

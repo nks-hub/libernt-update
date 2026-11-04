@@ -42,9 +42,11 @@ cd "$SRC"
 git fetch -q origin nks
 git checkout -q -B nks origin/nks
 head=$(git rev-parse HEAD)
+feed_index="$FEED/feed.json"
+[ ! -f "$FEED/feed-v2.json" ] || feed_index="$FEED/feed-v2.json"
 if python3 -c 'import json,sys; sys.exit(0 if any(r["commit"] == sys.argv[2] and r.get("client") == sys.argv[3]
                                                     for r in json.load(open(sys.argv[1]))["releases"]) else 1)' \
-        "$FEED/feed.json" "$head" "$client"; then
+        "$feed_index" "$head" "$client"; then
     echo "commit $head with client $client is already published"
 else
     echo "building $head with client $client"
@@ -57,7 +59,11 @@ else
     [ -z "$(git status --porcelain --untracked-files=normal)" ] && [ "$(git rev-parse HEAD)" = "$head" ] || {
         echo "source checkout changed while building" >&2; exit 1;
     }
-    python3 "$LUUP" publish --key "$KEY" --feed "$FEED" --img "$OUT/LiberNT.img" --commit "$head" --repo "$SRC" --client "$client_dir"
+    if [ -f "$FEED/feed-v2.json" ]; then
+        python3 "$LUUP" publish --key "$KEY" --feed "$FEED" --img "$OUT/LiberNT.img" --commit "$head" --repo "$SRC" --client "$client_dir" --registry
+    else
+        python3 "$LUUP" publish --key "$KEY" --feed "$FEED" --img "$OUT/LiberNT.img" --commit "$head" --repo "$SRC" --client "$client_dir"
+    fi
 fi
 
 # A previous publish can have failed verification. Never push that feed on the next already-published run.
@@ -66,7 +72,9 @@ python3 "$LUUP" verify --feed "$FEED" --pub "$(cat "${KEY%.key}.pub")"
 if [ -n "$FEED_PUSH" ]; then
     # Objects and manifests first, the signed feed last: clients never see a release whose files are missing.
     ssh_cmd="ssh -i $PUSH_KEY -o BatchMode=yes -o StrictHostKeyChecking=accept-new"
-    rsync -a -e "$ssh_cmd" --exclude feed.json --exclude feed.json.sig "$FEED/" "$FEED_PUSH"
-    rsync -a -e "$ssh_cmd" "$FEED/feed.json" "$FEED/feed.json.sig" "$FEED_PUSH"
+    rsync -a -e "$ssh_cmd" --exclude feed.json --exclude feed.json.sig --exclude feed-v2.json --exclude feed-v2.json.sig "$FEED/" "$FEED_PUSH"
+    for index in feed.json feed-v2.json; do
+        [ ! -f "$FEED/$index" ] || rsync -a -e "$ssh_cmd" "$FEED/$index" "$FEED/$index.sig" "$FEED_PUSH"
+    done
     echo "feed pushed to $FEED_PUSH"
 fi

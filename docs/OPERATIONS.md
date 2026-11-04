@@ -20,6 +20,17 @@ journalctl -u luup-release.service -n 20 -o cat
 
 The fork merges upstream daily (`Sync upstream` workflow). To merge now: `gh workflow run "Sync upstream" -R nks-hub/LiberNT --ref nks`. A merge conflict opens an issue in the fork and fails the workflow.
 
+## Enable registry servicing
+
+1. Publish and install an OS bootstrap build containing the `UpdateExecute` SMSS change through the existing file-only feed. Complete its restart verification before enabling registry updates.
+2. Install the registry-capable client. A running compatible SMSS exposes `HKLM\HARDWARE\LiberNTUpdate\Version = 1`; the client refuses registry updates without it.
+3. Identify the original factory image of each legacy installation. File updates do not establish which hive defaults it started with. Never use an installed machine's hive backup as factory input.
+4. In a private staging feed, publish the verified original factory image with `publish --img ... --registry`, then publish the current compatible image with the same option. Retain the existing release history. Do not expose the original baseline as the public latest release between these steps.
+5. Set `registryBaseRelease` to the staged release representing that installation's original factory hives. Omit it only when the client already recorded a verified registry baseline.
+6. Verify the staging feed and activate its objects and manifests before `feed-v2.json` and its signature. The original v1 index stays frozen for older clients. Subsequent `build-release.sh` runs preserve registry publishing when v2 exists.
+
+The client caches verified registry snapshots and keeps per-value undo records in its transaction. It does not replace whole installed hives. The first successful restart retains recovery; confirmation still requires another boot identity.
+
 ## Check the feed
 
 ```sh

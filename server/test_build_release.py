@@ -40,7 +40,7 @@ class ReleaseChecks(unittest.TestCase):
         self.executable("python3", 'if [ "$1" = -c ]; then exec "$REAL_PYTHON" "$@"; fi\n'
                                   'echo "$2" >> "$CALL_LOG"\n'
                                   'if [ "$2" = verify ] && [ "${BAD_FEED:-0}" = 1 ]; then exit 7; fi\n')
-        self.executable("rsync", 'echo PUSH >> "$CALL_LOG"\n')
+        self.executable("rsync", 'echo PUSH >> "$CALL_LOG"\necho "PUSH:$*" >> "$CALL_LOG"\n')
 
     def executable(self, name, body):
         path = self.bin / name
@@ -64,6 +64,18 @@ class ReleaseChecks(unittest.TestCase):
         result, calls = self.run_release()
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(calls, ["verify"])
+
+    def test_registry_feed_is_checked_and_both_indices_follow_the_objects(self):
+        (self.feed / "feed-v2.json").write_bytes((self.feed / "feed.json").read_bytes())
+        (self.feed / "feed.json").write_text(json.dumps({"releases": [{"commit": "b" * 40, "client": "v0.0.1"}]}))
+        result, calls = self.run_release()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0], "verify")
+        pushes = [line for line in calls if line.startswith("PUSH:")]
+        self.assertEqual(len(pushes), 3)
+        self.assertIn("--exclude feed-v2.json", pushes[0])
+        self.assertIn(str(self.feed / "feed.json.sig"), pushes[1])
+        self.assertIn(str(self.feed / "feed-v2.json.sig"), pushes[2])
 
     def test_corrupt_cached_client_is_rejected_before_publication(self):
         (self.client / "LiberNTUpdate.exe").write_bytes(b"corrupt")

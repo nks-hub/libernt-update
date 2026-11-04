@@ -5,7 +5,7 @@ cd /d "%~dp0.."
 set /p VSDIR=<out\vsdir.txt
 call "%VSDIR%\VC\Auxiliary\Build\vcvars64.bat" >nul || exit /b 1
 cl /nologo /std:c++17 /O2 /EHsc /W3 /MT /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DLUUP_REGISTRY_TESTING /Fo:out\ ^
-   tests\boot_vm.cpp src\feed.cpp src\runtime.cpp src\registry.cpp src\http.cpp src\util.cpp src\sha256.cpp boot\bootplan.c boot\regplan.c ^
+   tests\boot_vm.cpp src\feed.cpp src\runtime.cpp src\registry.cpp src\registry_snapshot.cpp src\http.cpp src\util.cpp src\sha256.cpp boot\bootplan.c boot\regplan.c ^
    third_party\monocypher\monocypher.c third_party\monocypher\monocypher-ed25519.c ^
    /Fe:out\boot_vm.exe /link wininet.lib comctl32.lib shell32.lib advapi32.lib user32.lib gdi32.lib ntdll.lib
 if errorlevel 1 exit /b %errorlevel%

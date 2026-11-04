@@ -103,7 +103,7 @@ void RefreshInfo() {
     if (g_busy) heading = Tr(L"Pracuji na aktualizaci", L"Working on the update");
     else if (!pend.empty()) heading = Tr(L"Aktualizace čeká na restart", L"The update needs a restart");
     else if (!g_haveCheck) heading = Tr(L"Kontroluji aktualizace", L"Checking for updates");
-    else if (g_check.changes.empty()) heading = Tr(L"Systém je aktuální", L"The system is up to date");
+    else if (!g_check.ChangeCount()) heading = Tr(L"Systém je aktuální", L"The system is up to date");
     else heading = Tr(L"Je k dispozici aktualizace", L"An update is available");
     SetWindowTextW(g_heading, heading.c_str());
 
@@ -111,12 +111,12 @@ void RefreshInfo() {
                           (inst.empty() ? std::wstring(Tr(L"zatím neevidováno", L"not recorded yet")) : CompactRelease(inst));
     if (g_haveCheck) {
         detail += Tr(L"\r\nNejnovější: ", L"\r\nNewest: ") + CompactRelease(g_check.latest.id);
-        if (!g_check.changes.empty())
-            detail += Tr(L"  ·  souborů ke změně: ", L"  ·  files to change: ") + std::to_wstring(g_check.changes.size());
+        if (g_check.ChangeCount())
+            detail += Tr(L"  ·  změn: ", L"  ·  changes: ") + std::to_wstring(g_check.ChangeCount());
     }
     SetWindowTextW(g_detail, detail.c_str());
     EnableWindow(g_btn[0], !g_busy);
-    EnableWindow(g_btn[1], !g_busy && g_haveCheck && !g_check.changes.empty() && pend.empty());
+    EnableWindow(g_btn[1], !g_busy && g_haveCheck && g_check.HasUpdate() && pend.empty());
     EnableWindow(g_btn[2], !g_busy && pend.empty());
     EnableWindow(g_btn[3], !g_busy && !pend.empty());
 }
@@ -140,10 +140,18 @@ void ShowCheck() {
                                                     : c.oldSha.empty() ? Tr(L"nový", L"new") : Tr(L"změněný", L"changed"));
         row++;
     }
-    if (!row) SetCell(g_changes, 0, 0, Tr(L"Žádné soubory není potřeba měnit.", L"No files need to be changed."));
+    for (auto& change : g_check.registryChanges) {
+        SetCell(g_changes, row, 0, RegistryDisplayName(change.after));
+        SetCell(g_changes, row, 1, Tr(L"registr", L"registry"));
+        SetCell(g_changes, row++, 2, !change.after.present ? Tr(L"odstraněný", L"removed")
+                                      : !change.before.present ? Tr(L"nový", L"new") : Tr(L"změněný", L"changed"));
+    }
+    if (!row) SetCell(g_changes, 0, 0, Tr(L"Žádné změny nejsou potřeba.", L"No changes are needed."));
     std::wstring notes;
     for (auto& n : g_check.latest.notes) notes += Widen(n) + L"\r\n";
     if (notes.empty()) notes = Tr(L"K tomuto vydání nejsou poznámky.", L"This release has no notes.");
+    if (g_check.registryPreserved) notes += Tr(L"\r\nMístní úpravy registru zachovány: ", L"\r\nLocal registry changes preserved: ") +
+                                              std::to_wstring(g_check.registryPreserved);
     SetWindowTextW(g_notes, notes.c_str());
 }
 
@@ -316,9 +324,9 @@ LRESULT CALLBACK WndProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 g_check = *d->check;
                 g_haveCheck = true;
                 ShowCheck();
-                SetWindowTextW(g_status, (g_check.changes.empty()
+                SetWindowTextW(g_status, (!g_check.ChangeCount()
                                               ? std::wstring(Tr(L"Systém odpovídá nejnovějšímu vydání.", L"The system matches the newest release."))
-                                              : Tr(L"Souborů k aktualizaci: ", L"Files to update: ") + std::to_wstring(g_check.changes.size()))
+                                              : Tr(L"Změn k instalaci: ", L"Changes to install: ") + std::to_wstring(g_check.ChangeCount()))
                                              .c_str());
             } else {
                 SetWindowTextW(g_status, d->message.c_str());

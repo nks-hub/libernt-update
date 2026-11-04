@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <ctime>
 #include <map>
+#include <set>
 
 #include "feed_internal.h"
 #include "http.h"
@@ -15,6 +16,7 @@
 #include "util.h"
 
 #include "../boot/bootplan.h"
+#include "../boot/regplan.h"
 extern "C" {
 #include "../third_party/monocypher/monocypher-ed25519.h"
 }
@@ -189,74 +191,24 @@ bool AddRecoveryEntry(const Config& cfg) {
     return ok;
 }
 
-/// Installs luupboot.exe into system32 and registers it in BootExecute after autochk.
-bool EnsureBootApplier(std::wstring& error) {
-    wchar_t exe[MAX_PATH], sys[MAX_PATH];
-    GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    GetSystemDirectoryW(sys, MAX_PATH);
-    std::wstring src = JoinPath(std::wstring(exe).substr(0, std::wstring(exe).find_last_of(L'\\')), L"luupboot.exe");
-    std::wstring dst = JoinPath(sys, L"luupboot.exe");
-    if (!FileExists(src)) { error = src + Tr(L" chybí.", L" is missing."); return false; }
-    if (Sha256File(src) != Sha256File(dst) && !CopyFileW(src.c_str(), dst.c_str(), FALSE)) {
-        error = Tr(L"Nelze nainstalovat ", L"Cannot install ") + dst + L": " + LastErrorText(GetLastError());
-        return false;
-    }
-    HKEY key;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kSessionManager, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &key) != ERROR_SUCCESS) {
-        error = Tr(L"Nelze otevřít Session Manager v registru.", L"Cannot open Session Manager in the registry.");
-        return false;
-    }
-    DWORD size = 0, type = 0;
-    std::vector<std::wstring> items;
-    LONG query = RegQueryValueExW(key, L"BootExecute", nullptr, &type, nullptr, &size);
-    if (query != ERROR_FILE_NOT_FOUND && (query != ERROR_SUCCESS || type != REG_MULTI_SZ)) {
-        error = Tr(L"Nelze bezpečně přečíst BootExecute.", L"BootExecute cannot be read safely.");
-        RegCloseKey(key);
-        return false;
-    }
-    std::vector<wchar_t> buf(size / sizeof(wchar_t) + 2, 0);
-    if (query == ERROR_SUCCESS) {
-        query = RegQueryValueExW(key, L"BootExecute", nullptr, &type, (BYTE*)buf.data(), &size);
-        if (query != ERROR_SUCCESS || type != REG_MULTI_SZ) {
-            error = Tr(L"Nelze bezpečně přečíst BootExecute.", L"BootExecute cannot be read safely.");
-            RegCloseKey(key);
-            return false;
-        }
-        for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) items.emplace_back(p);
-    }
-    std::wstring entry = L"luupboot " + NtPath(DataDir());
-    std::vector<std::wstring> next;
-    for (auto& s : items)
-        if (_wcsnicmp(s.c_str(), L"luupboot", 8) != 0) next.push_back(s);
-    next.push_back(entry);
-    bool ok = true;
-    if (next != items) {
-        std::wstring blob;
-        for (auto& s : next) { blob += s; blob.push_back(L'\0'); }
-        blob.push_back(L'\0');
-        ok = RegSetValueExW(key, L"BootExecute", 0, REG_MULTI_SZ, (const BYTE*)blob.data(), (DWORD)(blob.size() * sizeof(wchar_t))) == ERROR_SUCCESS;
-        if (ok) RegFlushKey(key);
-        else error = Tr(L"Nelze zapsat BootExecute.", L"Cannot write BootExecute.");
-    }
-    RegCloseKey(key);
-    return ok;
-}
+#include "boot_registration.inc"
 
 struct Op {
     std::string path, newSha, oldSha;
     std::wstring staged;  ///< file inside the transaction to move into place; empty = delete the target
     std::wstring backup;  ///< copy of the previous file; empty = the file did not exist
     std::wstring target;  ///< disk path fixed when the transaction was made; later stages never map path again
+    bool registry = false;
 };
 
 /// Disk path of an op. Transactions written before target was recorded fall back to mapping the manifest path.
-std::wstring Target(const Config& cfg, const Op& o) { return o.target.empty() ? TargetPath(cfg, o.path) : o.target; }
+std::wstring Target(const Config& cfg, const Op& o) { return o.registry ? L"" : o.target.empty() ? TargetPath(cfg, o.path) : o.target; }
 
 json OpsToJson(const std::vector<Op>& ops) {
     json a = json::array();
     for (auto& o : ops)
         a.push_back({{"path", o.path}, {"newSha", o.newSha}, {"oldSha", o.oldSha}, {"staged", Narrow(o.staged)}, {"backup", Narrow(o.backup)},
-                     {"target", Narrow(o.target)}});
+                     {"target", Narrow(o.target)}, {"registry", o.registry}});
     return a;
 }
 
@@ -264,9 +216,11 @@ std::vector<Op> OpsFromJson(const json& a) {
     std::vector<Op> ops;
     for (auto& j : a)
         ops.push_back({j.value("path", ""), j.value("newSha", ""), j.value("oldSha", ""), Widen(j.value("staged", "")), Widen(j.value("backup", "")),
-                       Widen(j.value("target", ""))});
+                       Widen(j.value("target", "")), j.value("registry", false)});
     return ops;
 }
+
+#include "engine_registry.inc"
 
 /// Puts back the backups of the ops already applied (in reverse) after a failure in the middle. Every step goes to
 /// update.log; the returned text is empty when all files are back and names the ones that are not otherwise.
@@ -274,6 +228,13 @@ std::wstring UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t ap
     size_t failed = 0;
     std::wstring first;
     for (size_t i = applied; i-- > 0;) {
+        if (ops[i].registry) {
+            if (RegistryMatches(ops[i].backup, ops[i].oldSha)) continue;
+            if (Sha256File(ops[i].staged) == ops[i].newSha && Sha256File(ops[i].backup) == ops[i].oldSha &&
+                NT_SUCCESS(LuupApplyRegistry(NtPath(ops[i].backup).c_str(), NtPath(ops[i].staged).c_str()))) continue;
+            if (!failed++) first = Widen(ops[i].path);
+            continue;
+        }
         std::wstring target = Target(cfg, ops[i]);
         std::string have = FileExists(target) ? Sha256File(target) : "";
         if (have == ops[i].oldSha) continue;
@@ -300,6 +261,11 @@ std::wstring UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t ap
 bool VerifyTargets(const Config& cfg, const std::vector<Op>& ops, std::wstring& bad) {
     size_t mismatches = 0;
     for (auto& o : ops) {
+        if (o.registry) {
+            if (RegistryMatches(o.staged, o.newSha)) continue;
+            if (!mismatches++) bad = Widen(o.path);
+            continue;
+        }
         std::wstring target = Target(cfg, o);
         std::string have = FileExists(target) ? Sha256File(target) : "";
         if (have == o.newSha) continue;
@@ -335,12 +301,14 @@ void LogBootFailures() {
 bool WriteBootPlans(const Config& cfg, const std::vector<Op>& ops, std::wstring& error) {
     std::wstring plan = L"LUUP 1\n", undo = L"LUUP 1\n";
     for (auto& o : ops) {
+        if (o.registry) { plan += L"G\t" + NtPath(o.staged) + L"\t" + NtPath(o.backup) + L"\n"; continue; }
         std::wstring target = NtPath(Target(cfg, o));
         std::wstring expected = o.backup.empty() ? L"-" : NtPath(o.backup);
         plan += o.staged.empty() ? L"X\t" + target + L"\t" + expected + L"\n"
                                 : L"R\t" + NtPath(o.staged) + L"\t" + target + L"\t" + expected + L"\n";
     }
     for (size_t i = ops.size(); i-- > 0;) {
+        if (ops[i].registry) { undo += L"G\t" + NtPath(ops[i].backup) + L"\t" + NtPath(ops[i].staged) + L"\n"; continue; }
         std::wstring target = NtPath(Target(cfg, ops[i]));
         std::wstring expected = ops[i].staged.empty() ? L"-" : NtPath(ops[i].staged);
         undo += ops[i].backup.empty() ? L"X\t" + target + L"\t" + expected + L"\n"
@@ -362,6 +330,7 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
                        const Progress& progress) {
     bool restart = false;
     for (auto& o : ops) {
+        if (o.registry) { restart = true; break; }
         std::wstring t = Target(cfg, o);
         if (InUse(t) && !IsClientFile(o.path)) { restart = true; break; }
     }
@@ -374,6 +343,7 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
 
     for (size_t i = 0; i < ops.size(); i++) {
         auto& o = ops[i];
+        if (o.registry) continue;
         std::wstring target = Target(cfg, o);
         if (progress)
             progress((int)(70 + 25 * i / std::max<size_t>(ops.size(), 1)),
@@ -493,6 +463,7 @@ InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::v
         txj["state"] = "done";
         state["pending"] = "";
         state["installed"] = releaseAfter;
+        RegistryState(state, txj, true);
         if (message.empty()) message = Tr(L"Nahrazeno souborů: ", L"Files replaced: ") + std::to_wstring(ops.size()) + L".";
         FinishHistory(hist, "installed", message);
     } else if (r == InstallOutcome::PendingRestart) {
@@ -508,7 +479,7 @@ InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::v
         state["pending"] = "";
         if (txj.value("mode", "") == "direct") {
             std::vector<Op> original = ops;
-            for (auto& op : original) op.newSha = op.oldSha;
+            OriginalTargets(original);
             std::wstring mismatch;
             if (!VerifyTargets(cfg, original, mismatch)) {
                 state["pending"] = tx;
@@ -527,8 +498,9 @@ InstallOutcome RunTx(const Config& cfg, const std::string& tx, json& txj, std::v
             RemoveRecoveryEntry(cfg);
         }
         state["installed"] = txj.value("installedBefore", "");
+        RegistryState(state, txj, false);
         std::vector<Op> original = ops;
-        for (auto& op : original) op.newSha = op.oldSha;
+        OriginalTargets(original);
         std::wstring mismatch;
         state["pending"] = VerifyTargets(cfg, original, mismatch) ? "" : tx;
         SaveState(state);
@@ -556,6 +528,13 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
     size_t conflicts = 0;
     for (size_t i = old.size(); i-- > 0;) {
         Op o;
+        if (old[i].registry) {
+            bool conflict = false;
+            if (!PrepareRegistryRollback(old[i], ops, dir, i, o, conflict, message)) return InstallOutcome::Failed;
+            if (conflict) conflicts++;
+            if (!o.path.empty()) ops.push_back(o);
+            continue;
+        }
         o.path = old[i].path;
         o.oldSha = old[i].newSha;
         o.newSha = old[i].oldSha;
@@ -593,6 +572,20 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
     }
     std::string releaseBefore = conflicts ? "" : src.value("installedBefore", "");
     if (ops.empty()) {
+        if (!conflicts) {
+            json state = LoadState();
+            state["installed"] = releaseBefore;
+            RegistryState(state, src, false);
+            if (!SaveState(state)) { message = L"Cannot save the verified rollback baseline."; return InstallOutcome::Failed; }
+            message = Tr(L"Původní obsah je již obnoven. Výchozí vydání bylo potvrzeno.",
+                         L"The original contents are already restored. The previous release was confirmed.");
+            json original = HistoryFor(of);
+            if (!original.empty()) { original["rolledBackBy"] = tx; AddHistory(original); }
+            json history = NewHistory(tx, kind, releaseBefore, 0);
+            history["of"] = of;
+            FinishHistory(history, "installed", message);
+            return InstallOutcome::NothingToDo;
+        }
         message = Tr(L"Žádný soubor už nelze bezpečně vrátit; systém zůstal beze změny.",
                      L"No file can be safely undone now; the system was left unchanged.");
         return InstallOutcome::NothingToDo;
@@ -600,6 +593,10 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
     json txj{{"tx", tx}, {"kind", kind}, {"of", of}, {"release", releaseBefore}, {"installedBefore", LoadState().value("installed", "")},
              {"ops", OpsToJson(ops)}, {"state", "prepared"}};
     txj["conflicts"] = conflicts;
+    if (src.contains("registryBefore")) {
+        txj["registryBefore"] = LoadState().value("registryRelease", "");
+        txj["registryAfter"] = src["registryBefore"];
+    }
     json hist = NewHistory(tx, kind, releaseBefore, ops.size());
     hist["of"] = of;
     InstallOutcome r = RunTx(cfg, tx, txj, ops, hist, releaseBefore, message, progress);
@@ -648,6 +645,7 @@ Config LoadConfig() {
         if (j.contains("feedUrl")) c.feedUrl = Widen(j["feedUrl"].get<std::string>());
         if (j.contains("root")) c.root = Widen(j["root"].get<std::string>());
         if (j.contains("bootRoot")) c.bootRoot = Widen(j["bootRoot"].get<std::string>());
+        if (j.contains("registryBaseRelease")) c.registryBaseRelease = j["registryBaseRelease"].get<std::string>();
         if (j.contains("baseRelease")) c.baseRelease = j["baseRelease"].get<std::string>();
         if (j.contains("auto")) c.autoMode = j["auto"].get<std::string>();
         if (j.contains("checkMinutes")) c.checkMinutes = std::max(1, j["checkMinutes"].get<int>());
@@ -693,14 +691,23 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
         message = Tr(L"Předchozí aktualizaci klienta ještě ověřuje hlídač.", L"The previous client update is still being verified by its watchdog.");
         return InstallOutcome::Failed;
     }
-    if (check.changes.empty()) { message = Tr(L"Systém už odpovídá vydání ", L"The system already matches release ") + Widen(check.latest.id) + L"."; return InstallOutcome::NothingToDo; }
+    if (!check.ChangeCount()) {
+        if (!check.registryAfter.empty()) {
+            json state = LoadState();
+            state["registryRelease"] = check.registryAfter;
+            state["installed"] = check.latest.id;
+            if (!SaveState(state)) { message = L"Cannot save the verified registry baseline."; return InstallOutcome::Failed; }
+        }
+        message = Tr(L"Systém už odpovídá vydání ", L"The system already matches release ") + Widen(check.latest.id) + L".";
+        return InstallOutcome::NothingToDo;
+    }
     std::string tx = NewTxId("install");
     std::wstring dir = TxDir(tx);
     if (!EnsureDirs(dir, false)) {
         message = Tr(L"Nelze vytvořit složku aktualizace: ", L"Cannot create the update folder: ") + LastErrorText(GetLastError());
         return InstallOutcome::Failed;
     }
-    json hist = NewHistory(tx, "install", check.latest.id, check.changes.size());
+    json hist = NewHistory(tx, "install", check.latest.id, check.ChangeCount());
     bool selfUpdate = false;
     for (auto& change : check.changes)
         if (IsClientFile(change.path) && _stricmp(change.path.substr(change.path.find_last_of('/') + 1).c_str(), "LiberNTUpdate.exe") == 0)
@@ -753,8 +760,10 @@ InstallOutcome InstallUpdate(const Config& cfg, const CheckResult& check, std::w
         }
         ops.push_back(o);
     }
+    if (!PrepareRegistryOps(check, dir, ops, message)) { FinishHistory(hist, "failed", message); return InstallOutcome::Failed; }
     json txj{{"tx", tx}, {"kind", "install"}, {"release", check.latest.id}, {"commit", check.latest.commit},
              {"installedBefore", InstalledRelease()}, {"ops", OpsToJson(ops)}, {"state", "prepared"}};
+    if (!check.registryAfter.empty()) { txj["registryBefore"] = check.registryBefore; txj["registryAfter"] = check.registryAfter; }
     if (!SaveJson(JoinPath(dir, L"tx.json"), txj)) {
         message = Tr(L"Nelze uložit připravenou aktualizaci.", L"The prepared update cannot be saved.");
         FinishHistory(hist, "failed", message);
@@ -848,7 +857,7 @@ void RunAutomatic(void* stopEvent) {
             CheckResult c;
             std::wstring err, msg;
             bool ok = CheckForUpdate(cfg, c, err, nullptr);
-            st = json{{"checkedEpoch", now}, {"checked", NowIso()}, {"latest", c.latest.id}, {"changes", ok ? (int)c.changes.size() : 0},
+            st = json{{"checkedEpoch", now}, {"checked", NowIso()}, {"latest", c.latest.id}, {"changes", ok ? (int)c.ChangeCount() : 0},
                       {"error", Narrow(err)}};
             // A release that failed or was rolled back on this machine is not retried automatically; a person
             // decides (window or /install), otherwise a broken release would be installed and undone forever.
@@ -857,11 +866,11 @@ void RunAutomatic(void* stopEvent) {
                 if (e.value("kind", "") == "install" && e.value("release", "") == c.latest.id &&
                     (e.value("result", "") == "failed" || e.contains("rolledBackBy")))
                     failedHere = true;
-            if (ok && !c.changes.empty() && cfg.autoMode == "install" && failedHere) {
+            if (ok && c.HasUpdate() && cfg.autoMode == "install" && failedHere) {
                 st["error"] = "release " + c.latest.id + " failed or was rolled back here; install it by hand to retry";
                 LogLine("auto: " + st["error"].get<std::string>());
             }
-            if (ok && !c.changes.empty() && cfg.autoMode == "install" && !failedHere) {
+            if (ok && c.HasUpdate() && cfg.autoMode == "install" && !failedHere) {
                 InstallOutcome r = InstallUpdate(cfg, c, msg, nullptr);
                 LogLine("auto install " + c.latest.id + ": " + Narrow(msg));
                 if (r == InstallOutcome::Installed) st["changes"] = 0;

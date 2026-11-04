@@ -75,6 +75,23 @@ static NTSTATUS OpenKey(PCWSTR key, ACCESS_MASK access, HANDLE* handle) {
     return NtOpenKey(handle, access, &attributes);
 }
 
+#ifndef LUUP_REGISTRY_TESTING
+static BOOLEAN RegistryReady(void) {
+    HANDLE key = NULL;
+    UNICODE_STRING name;
+    ULONG size = 0;
+    UCHAR data[FIELD_OFFSET(REG_PARTIAL_VALUE, Data) + sizeof(ULONG)];
+    REG_PARTIAL_VALUE* value = (REG_PARTIAL_VALUE*)data;
+    BOOLEAN ready = FALSE;
+    if (!NT_SUCCESS(OpenKey(L"\\Registry\\Machine\\HARDWARE\\LiberNTUpdate", KEY_QUERY_VALUE, &key))) return FALSE;
+    RtlInitUnicodeString(&name, L"Version");
+    if (NT_SUCCESS(NtQueryValueKey(key, &name, 2, data, sizeof(data), &size)) &&
+        value->Type == REG_DWORD && value->DataLength == sizeof(ULONG) && *(ULONG*)value->Data == 1) ready = TRUE;
+    NtClose(key);
+    return ready;
+}
+#endif
+
 #ifdef LUUP_REGISTRY_TESTING
 static ULONG FlushFailures;
 void LuupSetRegistryFlushFailures(ULONG count) { FlushFailures = count; }
@@ -157,6 +174,10 @@ NTSTATUS LuupApplyRegistry(PCWSTR desiredRecordNtPath, PCWSTR expectedRecordNtPa
     BOOLEAN exists;
     UNICODE_STRING name;
     REG_FULL_KEY info;
+
+#ifndef LUUP_REGISTRY_TESTING
+    if (!RegistryReady()) return (NTSTATUS)0xc0000184L;
+#endif
 
     status = LuupReadFile(desiredRecordNtPath, (PVOID*)&desired, &desiredSize);
     if (!NT_SUCCESS(status)) goto done;

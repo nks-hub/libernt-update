@@ -2,6 +2,7 @@
 #include "../boot/regplan.h"
 #include <sddl.h>
 #include <cstring>
+#include "registry_migration_tests.inc"
 
 static bool RegistrySelfTest(const std::wstring& base, std::wstring& report) {
     bool ok = true;
@@ -103,6 +104,7 @@ static bool RegistrySelfTest(const std::wstring& base, std::wstring& report) {
     check(run(large, noLarge) && RegGetValueW(HKEY_CURRENT_USER, subkey.c_str(), large.name.c_str(), RRF_RT_REG_BINARY,
           &actualType, actualBytes.data(), &actualSize) == ERROR_SUCCESS && actualSize == large.data.size() && actualBytes == large.data,
           L"native registry preserves a value spanning multiple hive cells");
+    ok = RegistryMigrationSelfTest(base, native, subkey, report) && ok;
     RegDeleteTreeW(HKEY_CURRENT_USER, subkey.c_str());
     return ok;
 }

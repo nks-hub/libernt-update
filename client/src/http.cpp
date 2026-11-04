@@ -5,8 +5,9 @@
 
 #include "util.h"
 
-bool HttpGet(const std::wstring& url, std::vector<uint8_t>& out, std::wstring& error, size_t maxBytes) {
+bool HttpGet(const std::wstring& url, std::vector<uint8_t>& out, std::wstring& error, size_t maxBytes, unsigned* statusCode) {
     out.clear();
+    if (statusCode) *statusCode = 0;
     HINTERNET net = InternetOpenW(L"LiberNTUpdate/1.0", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
     if (!net) { error = L"InternetOpen: " + LastErrorText(GetLastError()); return false; }
     DWORD timeout = 30000;
@@ -22,7 +23,9 @@ bool HttpGet(const std::wstring& url, std::vector<uint8_t>& out, std::wstring& e
         return false;
     }
     DWORD status = 0, len = sizeof status;
-    if (HttpQueryInfoW(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &len, nullptr) && status != 200) {
+    bool haveStatus = HttpQueryInfoW(req, HTTP_QUERY_STATUS_CODE | HTTP_QUERY_FLAG_NUMBER, &status, &len, nullptr) != 0;
+    if (statusCode) *statusCode = status;
+    if (haveStatus && status != 200) {
         error = url + L": HTTP " + std::to_wstring(status);
         InternetCloseHandle(req);
         InternetCloseHandle(net);

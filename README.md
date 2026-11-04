@@ -19,10 +19,11 @@ Updates an installed [LiberNT](https://github.com/nks-hub/LiberNT) system to a n
 
 ## Features
 
-- 🔏 **Signed feed** - `feed.json` is checked against the Ed25519 key compiled into the client; manifests and files are checked by SHA-256.
+- 🔏 **Signed feed** - the release index is checked against the Ed25519 key compiled into the client; manifests, files and registry snapshots are checked by SHA-256.
 - 🔍 **Diff against the disk** - only files whose contents differ from the release are downloaded, whatever build the machine started from.
 - 🧩 **Setup variants** - the kernel and HAL keep the variant Setup installed (`ntoskrnl.exe` copied from `ntkrnlmp.exe` on multiprocessor machines).
-- 🔁 **Boot-time replacement** - when any changed file is in use, `luupboot.exe` (registered in `BootExecute`) replaces every changed file together at the next boot, before any Win32 process starts. The plan is a file, so the size of an update does not depend on the registry.
+- 🔁 **Boot-time replacement** - when any changed file is in use, `luupboot.exe` replaces the transaction at the next boot, before Win32 starts. Newer SMSS builds run it in `UpdateExecute` after the registry is initialized; older builds support file updates through `BootExecute`.
+- 🗂️ **Registry defaults** - signed factory snapshots supply new driver and service settings. Updates compare old defaults, new defaults and the installed values, preserve local configuration and keep guarded rollback records.
 - ✅ **Boot verification** - the `LiberNTUpdate` service checks every replaced file after the restart and rolls the update back when one does not match; a rollback restores only the files that actually changed.
 - 🛟 **Recovery after a failed boot** - when two boots after an update never reach the service, `luupboot.exe` restores the previous files on the third. During an update `freeldr.ini` gets the entry "LiberNT (undo the last update)", which starts the previous kernel and HAL and undoes the update at once.
 - 🔄 **Automatic updates** - the service checks the feed (every 6 hours by default), installs what it finds and restarts at 3:00 when an update waits for a restart. A tray icon announces updates and offers the restart.
@@ -38,6 +39,7 @@ Updates an installed [LiberNT](https://github.com/nks-hub/LiberNT) system to a n
 - Build machine: Python 3.12+ with PyNaCl, 7-Zip (`7z`) and a configured LiberNT build tree. It runs wherever LiberNT is built; Linux (Debian 13, `python3-nacl`, `p7zip-full`) is what `build-release.sh` and the systemd units assume.
 - Client build: Visual Studio 2022 or newer with the x64 C++ tools and the Windows SDK (`ntdll.lib` for `luupboot.exe`).
 - Target: LiberNT amd64.
+- Registry servicing also requires an SMSS build with `UpdateExecute` and a verified factory registry baseline.
 - Update server: any static HTTP server; `server/docker/` has an nginx container.
 
 ## Installation
@@ -74,6 +76,7 @@ start "" /wait "C:\Program Files\LiberNT Update\LiberNTUpdate.exe" /register
 | `feedUrl` | feed address; overrides the one compiled in |
 | `baseRelease` | verified installed release ID, required for the first update when `state.json` does not record it; the client refuses to guess |
 | `bootRoot` | explicit boot partition path when Setup cannot identify the EFI partition; check and install use the same mapping, including offline feeds |
+| `registryBaseRelease` | original factory hive release for an older installation whose registry baseline was not recorded; this is separate from later file updates |
 | `auto` | `install` checks and installs, `notify` only checks (the tray icon announces it), `off` |
 | `checkMinutes` | interval of the automatic check |
 | `restartHour` | local hour of the automatic restart for a pending update, `-1` never |
@@ -134,7 +137,7 @@ nginx serves `feed/` read-only with `no-cache` on `feed.json` and long caching f
 
 ## Limitations
 
-- Registry changes of a new build (new drivers or services in `hivesys.inf`) are not applied.
+- Older SMSS builds support file updates only. Registry servicing needs an OS bootstrap update with `UpdateExecute`, the registry-capable client and a verified factory baseline; see [migration order](docs/OPERATIONS.md#enable-registry-servicing).
 - A boot-start driver that crashes before smss runs stops `luupboot.exe` too; the recovery entry starts the previous kernel and HAL but the new boot drivers. Take a VM snapshot before trying risky builds.
 - A new boot loader that does not start cannot be undone from inside the system; its backup stays in the transaction folder.
 - The boot partition must be identified by Setup or configured explicitly with `bootRoot`. Booting a UEFI machine after a loader update still requires platform testing.

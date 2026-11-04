@@ -73,17 +73,24 @@ bool VerifySignature(const std::vector<uint8_t>& message, const std::string& sig
     return crypto_ed25519_check(signature.data(), publicKey.data(), message.data(), message.size()) == 0;
 }
 
-bool Fetch(const Config& cfg, const std::string& relative, std::vector<uint8_t>& out, std::wstring& error) {
-    size_t limit = relative == "feed.json.sig" ? 256 : 16u * 1024u * 1024u;
+bool Fetch(const Config& cfg, const std::string& relative, std::vector<uint8_t>& out, std::wstring& error,
+           size_t limit = 16u * 1024u * 1024u, bool* missing = nullptr) {
+    if (missing) *missing = false;
+    if (relative == "feed.json.sig" || relative == "feed-v2.json.sig") limit = 256;
     std::wstring url = cfg.feedUrl + Widen(relative);
     if (cfg.feedUrl.rfind(L"file:///", 0) == 0) {
         std::wstring path = url.substr(8);
         std::replace(path.begin(), path.end(), L'/', L'\\');
         if (ReadFileBytes(path, out, limit)) return true;
-        error = path + L": " + LastErrorText(GetLastError());
+        DWORD status = GetLastError();
+        if (missing) *missing = status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND;
+        error = path + L": " + LastErrorText(status);
         return false;
     }
-    return HttpGet(url, out, error, limit);
+    unsigned status = 0;
+    bool ok = HttpGet(url, out, error, limit, &status);
+    if (missing) *missing = status == 404;
+    return ok;
 }
 
 std::string Lower(std::string value) {
@@ -106,11 +113,14 @@ bool SafeManifestPath(const std::string& path) {
     return true;
 }
 
+#include "feed_registry.inc"
+
 }  // namespace
 
 void SetFeedTestPublicKey(const std::string& publicKeyHex) { g_testPublicKey = publicKeyHex; }
 
 bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, const Progress& progress) {
+    error.clear();
     UpdateLock operation(error);
     if (!operation || !SecureUpdateData(error)) return false;
     try {
@@ -125,7 +135,15 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
     }
     if (progress) progress(2, Tr(L"Stahuji seznam vydání…", L"Downloading the release list…"));
     std::vector<uint8_t> feedRaw, sigRaw;
-    if (!Fetch(cfg, "feed.json", feedRaw, error) || !Fetch(cfg, "feed.json.sig", sigRaw, error)) return false;
+    bool missing = false;
+    std::string feedName = "feed-v2.json";
+    if (!Fetch(cfg, feedName, feedRaw, error, 16u * 1024u * 1024u, &missing)) {
+        if (!missing || clientState.value("feedProtocol", 1) >= 2) return false;
+        feedName = "feed.json";
+        error.clear();
+        if (!Fetch(cfg, feedName, feedRaw, error)) return false;
+    }
+    if (!Fetch(cfg, feedName + ".sig", sigRaw, error)) return false;
     if (!VerifySignature(feedRaw, std::string(sigRaw.begin(), sigRaw.end()))) {
         error = Tr(L"Podpis seznamu vydání nesouhlasí. Aktualizace se odmítá.", L"The signature of the release list does not match. The update is refused.");
         LogLine("feed signature mismatch");
@@ -141,6 +159,11 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
     if (!feed.is_object() || !feed.contains("releases") || !feed["releases"].is_array() || feed["releases"].empty()) {
         error = Tr(L"Feed neobsahuje platný seznam vydání.", L"The feed has no valid release list.");
         return false;
+    }
+    if (feed.value("format", 1) != (feedName == "feed-v2.json" ? 2 : 1)) { error = L"Unsupported update feed format."; return false; }
+    if (feedName == "feed-v2.json" && clientState.value("feedProtocol", 1) < 2) {
+        clientState["feedProtocol"] = 2;
+        if (!SaveState(clientState)) { error = L"Cannot save the accepted update protocol."; return false; }
     }
     const json& releases = feed["releases"];
     long long previousSequence = 0;
@@ -211,6 +234,11 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
     if (progress) progress(5, Tr(L"Stahuji manifest ", L"Downloading manifest ") + Widen(out.latest.id) + L"…");
     json manifest;
     if (!loadManifest(release, manifest)) return false;
+    if (manifest.contains("registry") != (feedName == "feed-v2.json")) {
+        error = L"Registry updates require a version 2 feed and a factory registry snapshot.";
+        return false;
+    }
+    if (!CheckRegistry(cfg, releases, manifest, clientState, out, error)) return false;
     const json& files = manifest["files"];
 
     auto collectFiles = [&](const json& entries, std::map<std::string, std::string>& hashes,
@@ -393,11 +421,12 @@ bool CheckForUpdate(const Config& cfg, CheckResult& out, std::wstring& error, co
         if (local[key] == oldSha) out.changes.push_back({baseNames[key], "", 0, local[key]});
         else LogLine("removed path kept because local contents differ: " + baseNames[key]);
     }
-    if (progress) progress(100, Tr(L"Změněných souborů: ", L"Changed files: ") + std::to_wstring(out.changes.size()) + L".");
+    if (progress) progress(100, Tr(L"Změn: ", L"Changes: ") + std::to_wstring(out.ChangeCount()) + L".");
     return true;
     } catch (const json::exception&) {
         error = Tr(L"Podepsaný feed nebo manifest má neplatnou strukturu.", L"The signed feed or manifest has an invalid structure.");
         out.changes.clear();
+        out.registryChanges.clear();
         return false;
     }
 }

@@ -3,6 +3,7 @@
 #include <functional>
 #include <string>
 #include <vector>
+#include "registry.h"
 
 /// %ProgramData%\LiberNTUpdate: config, state, history, transactions and the log.
 std::wstring DataDir();
@@ -21,6 +22,7 @@ struct Config {
     int restartHour = 3;               ///< local hour for the automatic restart of a pending update; -1 = never
     std::wstring bootRoot;             ///< explicit EFI partition when Setup cannot identify the boot volume
     std::string baseRelease;            ///< verified release id for an installation not yet recorded in state
+    std::string registryBaseRelease;    ///< verified factory hive release for a legacy installation
 };
 Config LoadConfig();
 
@@ -75,6 +77,11 @@ struct CheckResult {
     std::string installed;  ///< id of the release installed through this tool, empty if none
     std::string pendingTx;  ///< transaction waiting for a restart, if any
     std::vector<Change> changes;
+    std::vector<RegistryChange> registryChanges;
+    std::string registryBefore, registryAfter;
+    size_t registryPreserved = 0;
+    size_t ChangeCount() const { return changes.size() + registryChanges.size(); }
+    bool HasUpdate() const { return ChangeCount() || (!registryAfter.empty() && registryAfter != registryBefore); }
 };
 
 struct HistoryEntry {

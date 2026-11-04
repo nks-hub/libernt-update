@@ -1,15 +1,18 @@
 // Kept in the engine's translation unit because recovery uses the private transaction journal and operations.
 static bool CommitOutcome(const Config& cfg, const std::string& tx, json& txj, const json& hist,
-                          const std::string& result, const std::string& installed, const std::wstring& text, std::wstring& message) {
-    json marker{{"tx", tx}, {"result", result}, {"installed", installed}, {"message", Narrow(text)}};
+                          const std::string& result, const std::string& installed, const std::wstring& text, std::wstring& message,
+                          bool registryApplied = false) {
+    json marker{{"tx", tx}, {"result", result}, {"installed", installed}, {"message", Narrow(text)}, {"registryApplied", registryApplied}};
     std::wstring archive = JoinPath(TxDir(tx), L"boot.done");
     bool retired = GetFileAttributesW(archive.c_str()) != INVALID_FILE_ATTRIBUTES;
     // Boot must stop using the plans before pending can be cleared, even if the service is killed here.
     if (!retired && !SaveJson(BootFile(L"committed"), marker)) { message = L"Cannot commit the boot result; recovery was retained."; return false; }
     txj["state"] = result;
     txj["finalInstalled"] = installed;
+    txj["registryApplied"] = registryApplied;
     json state = LoadState();
     state["installed"] = installed;
+    RegistryState(state, txj, result == "installed" || registryApplied);
     state["pending"] = "";
     if (!SaveJson(JoinPath(TxDir(tx), L"tx.json"), txj)) { message = L"Cannot save the recovery journal."; return false; }
     if (!retired && !MoveFileExW(BootDir().c_str(), archive.c_str(), MOVEFILE_WRITE_THROUGH)) {
@@ -36,16 +39,16 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
     json hist = HistoryFor(tx);
     if (hist.empty()) hist = NewHistory(tx, txj.value("kind", "install"), txj.value("release", ""), ops.size());
     std::string before = txj.value("installedBefore", "");
-    auto finish = [&](const std::string& result, const std::string& installed, const std::wstring& text) {
-        return CommitOutcome(cfg, tx, txj, hist, result, installed, text, message);
+    auto finish = [&](const std::string& result, const std::string& installed, const std::wstring& text, bool registryApplied = false) {
+        return CommitOutcome(cfg, tx, txj, hist, result, installed, text, message, registryApplied);
     };
     json committed = LoadJson(BootFile(L"committed"), json::object());
     if (committed.value("tx", "") == tx) {
-        finish(committed.value("result", "failed"), committed.value("installed", ""), Widen(committed.value("message", "")));
+        finish(committed.value("result", "failed"), committed.value("installed", ""), Widen(committed.value("message", "")), committed.value("registryApplied", false));
         return true;
     }
     if (txj.contains("finalInstalled")) {
-        finish(txj.value("state", "failed").c_str(), txj.value("finalInstalled", ""), L"The recovery result was committed.");
+        finish(txj.value("state", "failed").c_str(), txj.value("finalInstalled", ""), L"The recovery result was committed.", txj.value("registryApplied", false));
         return true;
     }
     if (txj.value("state", "") == "done") {
@@ -78,7 +81,7 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
     if (ReadFileBytes(BootFile(L"rolledback"), raw)) {
         bool cancelled = std::string(raw.begin(), raw.end()).rfind("cancelled", 0) == 0;
         std::vector<Op> originals = ops;
-        for (auto& op : originals) op.newSha = op.oldSha;
+        OriginalTargets(originals);
         std::wstring mismatch;
         bool complete = VerifyTargets(cfg, originals, mismatch);
         finish(cancelled ? "cancelled" : complete ? "failed" : "partial-rollback", complete ? before : "",
@@ -117,7 +120,7 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
             return true;
         }
         finish(txj.value("conflicts", 0) ? "partial-rollback" : "installed", txj.value("release", ""),
-               Tr(L"Aktualizace byla ověřena po startu nové verze.", L"The update was verified after booting the new version."));
+               Tr(L"Aktualizace byla ověřena po startu nové verze.", L"The update was verified after booting the new version."), true);
         return true;
     }
     if (!FileExists(BootFile(L"plan.done"))) {

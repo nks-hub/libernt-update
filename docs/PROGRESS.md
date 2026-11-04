@@ -27,12 +27,15 @@ Stav k 4. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - `7750899`: publisher umí připojit podepsaný odkaz na tovární stav registru; exportér má tři regresní testy.
 - `b453f3b`: nativní operace registru kontrolují očekávaný obsah, zachovávají pozdější úpravy a vyžadují uložení změn. Tehdejší sada 70 kontrol prošla i na LiberNT; tato revize ještě neobsahovala úplné napojení instalace.
 - OS `5fccfb5`: SMSS zpřístupňuje fázi `UpdateExecute` po inicializaci registru a před KnownDLLs a Win32. Sestavení Clang a přechod ve dvou skutečných restartech prošly; běžící systém potvrdil podporu této fáze.
+- Společná instalace souboru a SOFTWARE a následný rollback prošly čtyřmi dalšími skutečnými restarty. Původní `BootExecute` i `UpdateExecute` jsou obnovené a dočasný nativní helper odstraněný.
+- Aktuální klient prošel na LiberNT 95 kontrolami, včetně zachování místních změn, potvrzení registru bez zápisů, rollbacku a zákazu návratu na starý feed. SHA-256 testovaného EXE: `388de44e8c9723cce134d42b253587ba36efbbec734f0db440b617e2790c6c61`.
+- Nativní helper použitý při skutečných restartech měl SHA-256 `f9fb10540bd9b5b2d663c669a2e86a3c0d8bfad1b3b22dfd54286ad98e1aac69`. Toto je důkaz pro konkrétní testovaný artefakt; novější sestavení jej automaticky nepřebírá.
 
 ## Právě probíhá
 
-- Napojení továrních stavů registru na kontrolu, společnou transakci se soubory, potvrzení a rollback; změny zatím nejsou ve vydaném klientovi.
+- Napojení továrních stavů registru na kontrolu, společnou transakci se soubory, potvrzení a rollback je implementované a otestované; změny zatím nejsou ve vydaném klientovi.
 - Oddělení `feed-v2.json` od původního feedu, aby starší klient nedostal změny registru, které neumí použít. Publisher testy prošly; zbývá finální CI celého aktuálního celku.
-- První skutečný restart s novým SMSS použil soubor i hodnotu SOFTWARE úspěšně; čeká se na potvrzení druhým restartem a ověření návratu.
+- Zbývá dokončit CI aktuálního celku a ověřit přechod konkrétní starší provozní instalace.
 
 ## Důležité zjištění z testů
 
@@ -42,7 +45,6 @@ Cppcheck s cestami a přepínači skutečného sestavení nenašel problém v no
 
 ## Zbývající práce
 
-- Dokončit a doložit skutečný boot test registru včetně rollbacku a obnovit původní registrační seznamy testovacího stroje.
 - Ověřit přechod ze staršího klienta: důvěryhodnost datové složky, původní tovární stav registru a pořadí aktualizace SMSS a klienta.
 - Dořešit obnovu ovladačů, které spadnou dříve, než se updater spustí; samotná záloha jádra a HAL nestačí.
 - Dořešit nezávislou návratovou cestu při selhání nového zavaděče; kód ve spuštěném systému takové selhání sám neopraví.

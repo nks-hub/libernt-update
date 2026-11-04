@@ -27,12 +27,15 @@ static void PutObject(const Config& cfg, const std::string& text) {
     if (!WriteTextAtomic(feed, text)) throw std::runtime_error("cannot write probe object");
 }
 
+#include "registry_boot.inc"
+
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) return 2;
     std::wstring mode = argv[1];
     g_dataOverride = ProbeBase() + L"\\data";
     Config cfg{L"file:///C:/lntu-review/feed/", ProbeBase() + L"\\root"};
     std::wstring error;
+    if (mode.rfind(L"registry-", 0) == 0 || mode.rfind(L"smss-", 0) == 0) return RegistryBootProbe(mode, cfg);
     if (mode == L"selftest-client") {
         SECURITY_ATTRIBUTES attributes{sizeof attributes, nullptr, TRUE};
         HANDLE output = CreateFileW(L"C:\\lntu-selftest.txt", GENERIC_WRITE, FILE_SHARE_READ, &attributes, CREATE_ALWAYS, 0, nullptr);

@@ -194,12 +194,12 @@ def write_json(path: Path, data) -> bytes:
     return raw
 
 
-def sign_feed(feed_dir: Path, key: nacl.signing.SigningKey, feed: dict) -> None:
-    raw = write_json(feed_dir / "feed.json", feed)
+def sign_feed(feed_dir: Path, key: nacl.signing.SigningKey, feed: dict, name: str = "feed.json") -> None:
+    raw = write_json(feed_dir / name, feed)
     sig = key.sign(raw).signature
-    tmp = feed_dir / "feed.json.sig.tmp"
+    tmp = feed_dir / (name + ".sig.tmp")
     tmp.write_text(sig.hex() + "\n")
-    os.replace(tmp, feed_dir / "feed.json.sig")
+    os.replace(tmp, feed_dir / (name + ".sig"))
 
 
 def variant_aliases(files) -> list[dict]:
@@ -250,8 +250,13 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
     files = scan_tree(tree)
     if not files:
         raise SystemExit(f"{tree}: no serviced files")
-    feed_path = feed_dir / "feed.json"
-    feed = json.loads(feed_path.read_text("utf-8")) if feed_path.exists() else {"product": "LiberNT", "format": 1, "releases": []}
+    modern_feed = feed_dir / "feed-v2.json"
+    feed_name = "feed-v2.json" if registry is not None or modern_feed.exists() else "feed.json"
+    feed_path = feed_dir / feed_name
+    source = feed_path if feed_path.exists() else feed_dir / "feed.json"
+    feed = json.loads(source.read_text("utf-8")) if source.exists() else {"product": "LiberNT", "format": 1, "releases": []}
+    if feed_name == "feed-v2.json":
+        feed["format"] = 2
     previous = feed["releases"][-1] if feed["releases"] else None
     if previous and previous.get("registrySha256") and registry is None:
         raise SystemExit("registry defaults are required after registry publishing has been enabled")
@@ -342,17 +347,27 @@ def publish_tree(tree: Path, feed_dir: Path, key: nacl.signing.SigningKey, commi
     if registry_ref is not None:
         entry["registrySha256"] = registry_ref["sha256"]
     feed["releases"].append(entry)
-    sign_feed(feed_dir, key, feed)
+    sign_feed(feed_dir, key, feed, feed_name)
     print(f"published {release_id}: {len(files)} files, {stored} new objects, "
           f"{'first release' if changed is None else f'{changed} changed since {previous['id']}'}")
     return entry
 
 
 def verify_feed(feed_dir: Path, pub_hex: str) -> int:
-    raw = (feed_dir / "feed.json").read_bytes()
-    sig = bytes.fromhex((feed_dir / "feed.json.sig").read_text().strip())
+    names = [name for name in ("feed.json", "feed-v2.json") if (feed_dir / name).exists()]
+    if not names:
+        raise FileNotFoundError("no published feed")
+    return max(verify_feed_file(feed_dir, pub_hex, name) for name in names)
+
+
+def verify_feed_file(feed_dir: Path, pub_hex: str, name: str) -> int:
+    raw = (feed_dir / name).read_bytes()
+    sig = bytes.fromhex((feed_dir / (name + ".sig")).read_text().strip())
     nacl.signing.VerifyKey(bytes.fromhex(pub_hex)).verify(raw, sig)
     feed = json.loads(raw)
+    if feed["format"] != (2 if name == "feed-v2.json" else 1):
+        print(f"{name}: unsupported feed format")
+        return 1
     bad = 0
     for rel in feed["releases"]:
         mraw = (feed_dir / rel["manifest"]).read_bytes()
@@ -467,12 +482,17 @@ def self_test() -> int:
         registry = {"format": 1, "hives": {"SYSTEM": {"keys": ["CurrentControlSet\\Services\\DemoDriver"], "values": [
             {"key": "CurrentControlSet\\Services\\DemoDriver", "name": "Start", "type": 4, "data": "00000000"}
         ]}, "SOFTWARE": {"keys": [], "values": []}, "DEFAULT": {"keys": [], "values": []}}}
+        legacy_feed = (feed / "feed.json").read_bytes()
+        legacy_signature = (feed / "feed.json.sig").read_bytes()
         e9 = publish_tree(tree, feed, key, "1" * 40, now=t0 + dt.timedelta(hours=8), registry=registry)
         assert e9["sequence"] == e8["sequence"] + 1 and e9["changedFromPrevious"] == 0
         m9 = json.loads((feed / e9["manifest"]).read_text("utf-8"))
         registry_sha = m9["registry"]["sha256"]
         registry_obj = feed / "objects" / registry_sha[:2] / registry_sha
         assert registry_sha == e9["registrySha256"] and json.loads(registry_obj.read_bytes()) == registry
+        assert (feed / "feed.json").read_bytes() == legacy_feed and (feed / "feed.json.sig").read_bytes() == legacy_signature
+        modern = json.loads((feed / "feed-v2.json").read_bytes())
+        assert modern["format"] == 2 and modern["releases"][-2]["id"] == e8["id"], "v2 must retain legacy release identities"
         e10 = publish_tree(tree, feed, key, "2" * 40, now=t0 + dt.timedelta(hours=9), registry=registry)
         assert e10["id"] == e9["id"], "identical registry defaults must not create another release"
         registry["hives"]["SYSTEM"]["values"][0]["data"] = "01000000"
