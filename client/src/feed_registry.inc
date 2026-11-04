@@ -5,7 +5,7 @@ bool CheckRegistry(const Config& cfg, const json& releases, const json& manifest
         error = L"The new release omits the registry baseline. The update was refused.";
         return false;
     }
-    auto snapshot = [&](const json& item, const json& descriptor, RegistrySnapshot& result) {
+    auto validDescriptor = [&](const json& item, const json& descriptor) {
         if (!descriptor.is_object() || descriptor.at("format") != 1 || !descriptor.at("size").is_number_unsigned()) {
             error = L"Invalid registry snapshot descriptor.";
             return false;
@@ -16,6 +16,11 @@ bool CheckRegistry(const Config& cfg, const json& releases, const json& manifest
             error = L"Registry descriptor does not match the signed release.";
             return false;
         }
+        return true;
+    };
+    auto snapshot = [&](const json& descriptor, RegistrySnapshot& result) {
+        auto hash = descriptor["sha256"].get<std::string>();
+        auto size = descriptor["size"].get<uint64_t>();
         auto cache = JoinPath(DataDir(), L"registry\\" + Widen(hash) + L".json");
         std::vector<uint8_t> raw;
         if (!ReadFileBytes(cache, raw, (size_t)size) || raw.size() != size || Sha256Hex(raw.data(), raw.size()) != hash) {
@@ -34,8 +39,8 @@ bool CheckRegistry(const Config& cfg, const json& releases, const json& manifest
                    L"This SMSS does not support registry updates. Install an OS release with UpdateExecute first.");
         return false;
     }
-    RegistrySnapshot after;
-    if (!snapshot(latest, manifest["registry"], after)) return false;
+    const json& target = manifest["registry"];
+    if (!validDescriptor(latest, target)) return false;
     std::string baseline = state.value("registryRelease", "");
     if (baseline.empty()) baseline = cfg.registryBaseRelease;
     if (baseline.empty() && out.installed.empty()) baseline = cfg.baseRelease;
@@ -46,9 +51,9 @@ bool CheckRegistry(const Config& cfg, const json& releases, const json& manifest
                    L"The registry baseline is unknown. Set registryBaseRelease to the verified original installation image release.");
         return false;
     }
-    RegistrySnapshot before;
-    if (baseline == out.latest.id) before = after;
-    else {
+    json previous;
+    const json* original = &target;
+    if (baseline != out.latest.id) {
         auto path = base->value("manifest", "");
         std::vector<uint8_t> raw;
         if (!SafeManifestPath(path) || !Fetch(cfg, path, raw, error)) return false;
@@ -56,14 +61,21 @@ bool CheckRegistry(const Config& cfg, const json& releases, const json& manifest
             error = L"Registry baseline manifest does not match the signed release.";
             return false;
         }
-        auto previous = json::parse(raw.begin(), raw.end());
+        previous = json::parse(raw.begin(), raw.end());
         if (previous.value("id", "") != baseline || !previous.contains("registry")) {
             error = L"The original release has no factory registry snapshot. A verified baseline is required.";
             return false;
         }
-        if (!snapshot(*base, previous["registry"], before)) return false;
+        original = &previous["registry"];
     }
-    if (!PlanRegistryChanges(before, after, out.registryChanges, out.registryPreserved, error)) return false;
+    if (!validDescriptor(*base, *original)) return false;
+    if ((*original)["sha256"] == target["sha256"]) {
+        if ((*original)["size"] != target["size"]) { error = L"Identical registry hashes have conflicting sizes."; return false; }
+    } else {
+        RegistrySnapshot before, after;
+        if (!snapshot(*original, before) || !snapshot(target, after) ||
+            !PlanRegistryChanges(before, after, out.registryChanges, out.registryPreserved, error)) return false;
+    }
     out.registryBefore = baseline;
     out.registryAfter = out.latest.id;
     return true;

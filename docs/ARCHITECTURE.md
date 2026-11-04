@@ -43,7 +43,7 @@ The client tries v2 first and uses v1 only when v2 is absent (HTTP 404 or a miss
 3. Treats a missing file as wanted when it is new compared with the recorded installed release. An unknown installation requires a verified `baseRelease`; the previous release is never assumed. Boot loaders are only replaced, never added.
 4. Compares factory registry snapshots against the live registry. Changed local values stay untouched. Added parent keys are explicit operations; removed keys are deleted only when their remaining contents are also being removed. SYSTEM paths pin the selected control set when the transaction is prepared.
 
-The registry baseline is recorded independently from file releases. A legacy installation requires a verified `registryBaseRelease`; a file-only update is never evidence that its registry was migrated. Verified snapshots are cached by hash under `registry/`. Even a release whose desired values are already present advances this baseline when installed.
+The registry baseline is recorded independently from file releases. A legacy installation requires a verified `registryBaseRelease`; a file-only update is never evidence that its registry was migrated. Verified snapshots are cached by hash under `registry/`. Identical signed snapshot references need no object download or parsing. Even a release whose desired values are already present advances this baseline when installed.
 
 Checks, installs, recovery, cancellation and rollback share a machine-wide mutex. Downloaded metadata is limited to 16 MiB, signatures to 256 bytes, and objects to their signed length with a 512 MiB maximum. The data directory must have trusted ownership, no writable access for ordinary users and no reparse points.
 

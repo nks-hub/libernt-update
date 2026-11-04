@@ -190,6 +190,13 @@ static bool RegistryMigrationSelfTest(const std::wstring& base, const std::wstri
     bool already = CheckForUpdate(cfg, result, error, nullptr);
     check(already && !result.ChangeCount() && result.HasUpdate() && InstallUpdate(cfg, result, message, nullptr) == InstallOutcome::NothingToDo &&
           LoadState().value("registryRelease", "") == "G2", L"matching registry data advances its baseline without rewriting values");
+    auto unchangedHash = feedJson["releases"][1]["registrySha256"].get<std::string>();
+    auto unusedObject = JoinPath(feed, L"objects\\" + Widen(unchangedHash.substr(0, 2)) + L"\\" + Widen(unchangedHash));
+    DeleteFileW(unusedObject.c_str());
+    DeleteFileW(JoinPath(DataDir(), L"registry\\" + Widen(unchangedHash) + L".json").c_str());
+    check(CheckForUpdate(cfg, result, error, nullptr) && result.registryChanges.empty(),
+          L"identical signed registry references need no snapshot download or parsing");
+    object(raw(next));
     auto third = next;
     third["hives"]["SYSTEM"]["values"][0]["data"] = "04000000";
     feedJson["releases"].push_back(release("G3", 3, third, "after"));

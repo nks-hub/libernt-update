@@ -35,6 +35,27 @@ int wmain(int argc, wchar_t** argv) {
     g_dataOverride = ProbeBase() + L"\\data";
     Config cfg{L"file:///C:/lntu-review/feed/", ProbeBase() + L"\\root"};
     std::wstring error;
+    if (mode == L"registry-snapshot" && argc == 3) {
+        LARGE_INTEGER frequency, started, parsed, compared;
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&started);
+        std::vector<uint8_t> raw;
+        RegistrySnapshot snapshot;
+        if (!ReadFileBytes(argv[2], raw, 16 * 1024 * 1024) || !ParseRegistrySnapshot(raw, snapshot, error)) {
+            std::cout << "FAIL " << Narrow(error) << std::endl;
+            return 1;
+        }
+        QueryPerformanceCounter(&parsed);
+        std::vector<RegistryChange> changes;
+        size_t preserved = 0, values = 0;
+        bool ok = PlanRegistryChanges(snapshot, snapshot, changes, preserved, error) && changes.empty();
+        QueryPerformanceCounter(&compared);
+        for (const auto& key : snapshot.values) values += key.second.size();
+        std::cout << (ok ? "PASS" : "FAIL") << " bytes=" << raw.size() << " keys=" << snapshot.keys.size() << " values=" << values
+                  << " read_parse_ms=" << 1000.0 * (parsed.QuadPart - started.QuadPart) / frequency.QuadPart
+                  << " same_baseline_compare_ms=" << 1000.0 * (compared.QuadPart - parsed.QuadPart) / frequency.QuadPart << std::endl;
+        return ok ? 0 : 1;
+    }
     if (mode.rfind(L"registry-", 0) == 0 || mode.rfind(L"smss-", 0) == 0) return RegistryBootProbe(mode, cfg);
     if (mode == L"selftest-client") {
         SECURITY_ATTRIBUTES attributes{sizeof attributes, nullptr, TRUE};

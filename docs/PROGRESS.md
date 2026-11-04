@@ -28,14 +28,21 @@ Stav k 4. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - `b453f3b`: nativní operace registru kontrolují očekávaný obsah, zachovávají pozdější úpravy a vyžadují uložení změn. Tehdejší sada 70 kontrol prošla i na LiberNT; tato revize ještě neobsahovala úplné napojení instalace.
 - OS `5fccfb5`: SMSS zpřístupňuje fázi `UpdateExecute` po inicializaci registru a před KnownDLLs a Win32. Sestavení Clang a přechod ve dvou skutečných restartech prošly; běžící systém potvrdil podporu této fáze.
 - Společná instalace souboru a SOFTWARE a následný rollback prošly čtyřmi dalšími skutečnými restarty. Původní `BootExecute` i `UpdateExecute` jsou obnovené a dočasný nativní helper odstraněný.
-- Aktuální klient prošel na LiberNT 95 kontrolami, včetně zachování místních změn, potvrzení registru bez zápisů, rollbacku a zákazu návratu na starý feed. SHA-256 testovaného EXE: `388de44e8c9723cce134d42b253587ba36efbbec734f0db440b617e2790c6c61`.
+- Klient odpovídající `f9974a7` prošel na LiberNT 95 kontrolami, včetně zachování místních změn, potvrzení registru bez zápisů, rollbacku a zákazu návratu na starý feed. SHA-256 testovaného EXE: `388de44e8c9723cce134d42b253587ba36efbbec734f0db440b617e2790c6c61`.
 - Nativní helper použitý při skutečných restartech měl SHA-256 `f9fb10540bd9b5b2d663c669a2e86a3c0d8bfad1b3b22dfd54286ad98e1aac69`. Toto je důkaz pro konkrétní testovaný artefakt; novější sestavení jej automaticky nepřebírá.
+- `f9974a7`: napojení registru a odděleného v2 feedu je commitnuté a odeslané; [CI 41926092184](https://github.com/nks-hub/libernt-update/actions/runs/41926092184) prošlo pro klienta i publisher. Samostatně prošlo také všech pět Linux testů sestavovacího skriptu.
+- Optimalizace shodných podepsaných referencí přeskočí stahování a rozebírání nepotřebného továrního registru. Na LiberNT prošlo 96 kontrol včetně testu s odstraněným objektem i cache; SHA-256 klienta je `62e7c79b8bf633b7f587bc8b2e7efcd23a45230891ab7b5b82fbb8eb3c0f9890`.
+
+## Naměřený výkon registru
+
+Testovací VM měla 2 CPU a 2 GiB RAM. Skutečný tovární export obsahoval 6 884 571 bajtů, 16 382 klíčů a 26 947 hodnot. Dvě měření dala 565–567 ms pro načtení a rozebrání JSON a 861–872 ms pro úplné porovnání stejných základů. Použitý testovací příkaz je `boot_vm.exe registry-snapshot <soubor>`.
+
+Při shodných podepsaných hashech se nyní tato práce neprovádí. Uvedená čísla měří pouze zpracování registru; nezahrnují síť, porovnání systémových souborů ani celou instalaci.
 
 ## Právě probíhá
 
 - Napojení továrních stavů registru na kontrolu, společnou transakci se soubory, potvrzení a rollback je implementované a otestované; změny zatím nejsou ve vydaném klientovi.
-- Oddělení `feed-v2.json` od původního feedu, aby starší klient nedostal změny registru, které neumí použít. Publisher testy prošly; zbývá finální CI celého aktuálního celku.
-- Zbývá dokončit CI aktuálního celku a ověřit přechod konkrétní starší provozní instalace.
+- Ověření přechodu konkrétní starší provozní instalace; nový klient ani nový v2 feed zatím nejsou publikované.
 
 ## Důležité zjištění z testů
 
@@ -50,6 +57,7 @@ Cppcheck s cestami a přepínači skutečného sestavení nenašel problém v no
 - Dořešit nezávislou návratovou cestu při selhání nového zavaděče; kód ve spuštěném systému takové selhání sám neopraví.
 - Doplnit bezpečné určení EFI oddílu a ověřit skutečný UEFI boot po změně zavaděče.
 - Upravit práci s ikonou v liště při zachování uživatelovy volby připnutí; potom pořídit nové screenshoty.
-- Změřit náklady zpracování skutečného továrního registru a ověřit chybové HTTP scénáře nového feedu.
+- Ověřit chybové HTTP scénáře nového feedu; současné regrese fallbacku používají místní feed.
+- Upřesnit release kanál pro testovaná a provozní vydání. Synchronizace fork zdrojů nepřebírá upstream GitHub Releases; vlastní binární vydání patří do stávajícího sestavovacího postupu.
 
 Nová klientská verze ani nový registry feed zatím nejsou publikované. Tento přehled není potvrzením, že všech pět omezení už zmizelo.
