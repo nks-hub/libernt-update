@@ -39,6 +39,7 @@ Stav k 5. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - `d102bde`: připnutí ikony, oprava nabídky a screenshot jsou odeslané; [CI 41934024700](https://github.com/nks-hub/libernt-update/actions/runs/41934024700) prošlo pro klienta i publisher.
 - Na LiberNT prošlo devět HTTP kontrol: přechod na starý feed pouze při 404 před přijetím v2, odmítnutí 403/500, chybějícího či nesprávného podpisu a neplatného JSON, přijetí v2, zákaz pozdějšího návratu na starý protokol a limit velikosti odpovědi. Test používá pouze dočasný port na `127.0.0.1` a syntetická data; nejde o veřejný aktualizační server.
 - HTTP testy prošly review a jsou součástí CI. SHA-256 testovaného helperu: `4bb1f43264385f27b599f07e88b1bb83077dc872305945f17094ac55cc1e7147`; výsledky dalších sestavení jsou v [CI](https://github.com/nks-hub/libernt-update/actions/workflows/ci.yml).
+- `1ff805e`: HTTP regrese a jejich napojení do CI jsou odeslané; [CI 41934672654](https://github.com/nks-hub/libernt-update/actions/runs/41934672654) prošlo včetně Windows běhu všech devíti HTTP kontrol.
 
 ## Naměřený výkon registru
 
@@ -46,10 +47,10 @@ Testovací VM měla 2 CPU a 2 GiB RAM. Skutečný tovární export obsahoval 6 8
 
 Při shodných podepsaných hashech se nyní tato práce neprovádí. Uvedená čísla měří pouze zpracování registru; nezahrnují síť, porovnání systémových souborů ani celou instalaci.
 
-## Právě probíhá
+## Stav vydání
 
 - Registr i úprava ikony jsou implementované a otestované; změny zatím nejsou ve vydaném klientovi.
-- Ověření přechodu konkrétní starší provozní instalace; nový klient ani nový v2 feed zatím nejsou publikované.
+- Před vydáním zbývá ověřit přechod konkrétní starší provozní instalace. Její datová složka umožňuje zápis běžným uživatelům, a nový klient proto odmítá převzít její plány obnovy. Pouhá změna oprávnění by nedoložila důvěryhodnost starých plánů.
 
 ## Důležité zjištění z testů
 

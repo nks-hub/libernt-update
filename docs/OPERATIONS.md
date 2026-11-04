@@ -2,7 +2,7 @@
 
 ## Release a new client
 
-1. Commit and push to `main`; CI builds the client and runs both self-tests.
+1. Commit and push to `main`; CI builds the client and runs the publisher tests, client self-test and HTTP probe.
 2. Tag it: `git tag -a v0.2.5 -m v0.2.5 && git push origin v0.2.5`.
 3. `release.yml` builds with `LNTU_VERSION=v0.2.5`, runs the self-test, checks `/version` and attaches `LiberNTUpdate.exe`, `luupboot.exe` and `SHA256SUMS` to the GitHub release.
 4. The next run of `build-release.sh` picks the release up (`releases/latest`), checks `SHA256SUMS` and publishes a feed release with it.
