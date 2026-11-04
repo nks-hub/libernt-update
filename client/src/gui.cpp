@@ -9,6 +9,7 @@
 
 #include "engine.h"
 #include "util.h"
+#include "tray.h"
 
 namespace {
 
@@ -480,11 +481,22 @@ LRESULT CALLBACK TrayProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
                 HMENU m = CreatePopupMenu();
                 AppendMenuW(m, MF_STRING, IdOpen, Tr(L"Otevřít LiberNT Update", L"Open LiberNT Update"));
                 if (!PendingTransaction().empty()) AppendMenuW(m, MF_STRING, IdRestartNow, Tr(L"Restartovat a dokončit aktualizaci", L"Restart and finish the update"));
+                bool pinned = false;
+                std::wstring error;
+                bool supported = ReadTrayPin(pinned, error);
+                AppendMenuW(m, MF_STRING | (pinned ? MF_CHECKED : 0) | (supported ? 0 : MF_GRAYED), kTrayPinCommand,
+                            Tr(L"Připnout ikonu v liště", L"Pin this icon"));
                 AppendMenuW(m, MF_STRING, IdHide, Tr(L"Skrýt ikonu", L"Hide the icon"));
                 POINT p;
                 GetCursorPos(&p);
+                MONITORINFO monitor{sizeof(monitor)};
+                UINT flags = TPM_RIGHTBUTTON;
+                if (GetMonitorInfoW(MonitorFromPoint(p, MONITOR_DEFAULTTONEAREST), &monitor) && p.y >= monitor.rcWork.bottom) {
+                    p.y = monitor.rcWork.bottom;
+                    flags |= TPM_BOTTOMALIGN;
+                }
                 SetForegroundWindow(w);
-                TrackPopupMenu(m, TPM_RIGHTBUTTON, p.x, p.y, 0, w, nullptr);
+                TrackPopupMenu(m, flags, p.x, p.y, 0, w, nullptr);
                 DestroyMenu(m);
             }
             return 0;
@@ -497,6 +509,15 @@ LRESULT CALLBACK TrayProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (LOWORD(wp) == IdHide) {
                 g_hiddenFor = g_announced;
                 RefreshTray(w);
+            } else if (LOWORD(wp) == kTrayPinCommand) {
+                bool pinned = false;
+                std::wstring error;
+                if (!ReadTrayPin(pinned, error) || !SetTrayPin(!pinned, error)) MessageBoxW(w, error.c_str(), L"LiberNT Update", MB_ICONERROR);
+                else {
+                    if (g_iconShown) Shell_NotifyIconW(NIM_DELETE, &g_nid);
+                    g_iconShown = false;
+                    RefreshTray(w);
+                }
             }
             return 0;
         case WM_DESTROY:
@@ -509,8 +530,8 @@ LRESULT CALLBACK TrayProc(HWND w, UINT msg, WPARAM wp, LPARAM lp) {
 
 }  // namespace
 
-int RunTray(HINSTANCE inst) {
-    HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\LiberNTUpdateTray");
+int RunTray(HINSTANCE inst, const wchar_t* mutexName) {
+    HANDLE single = CreateMutexW(nullptr, TRUE, mutexName);
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
     g_taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     WNDCLASSEXW wc{sizeof wc};
@@ -522,7 +543,7 @@ int RunTray(HINSTANCE inst) {
     // The V2 size works with shells that predate the Vista fields of NOTIFYICONDATAW.
     g_nid.cbSize = NOTIFYICONDATAW_V2_SIZE;
     g_nid.hWnd = w;
-    g_nid.uID = 1;
+    g_nid.uID = kTrayIconId;
     g_nid.uCallbackMessage = WmTray;
     g_nid.hIcon = (HICON)LoadImageW(inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
     RefreshTray(w);

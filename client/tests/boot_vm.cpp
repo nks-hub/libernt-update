@@ -28,6 +28,7 @@ static void PutObject(const Config& cfg, const std::string& text) {
 }
 
 #include "registry_boot.inc"
+#include "tray_vm.inc"
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) return 2;
@@ -35,6 +36,8 @@ int wmain(int argc, wchar_t** argv) {
     g_dataOverride = ProbeBase() + L"\\data";
     Config cfg{L"file:///C:/lntu-review/feed/", ProbeBase() + L"\\root"};
     std::wstring error;
+    if (mode == L"tray-test") return RunTrayTest();
+    if (mode == L"tray-launch" && argc == 3) return LaunchTrayTest(wcstoul(argv[2], nullptr, 10));
     if (mode == L"registry-snapshot" && argc == 3) {
         LARGE_INTEGER frequency, started, parsed, compared;
         QueryPerformanceFrequency(&frequency);

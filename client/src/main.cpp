@@ -9,9 +9,9 @@
 #include "engine.h"
 #include "runtime.h"
 #include "util.h"
+#include "tray.h"
 
 int RunGui(HINSTANCE inst);
-int RunTray(HINSTANCE inst);
 
 namespace {
 

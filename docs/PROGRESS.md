@@ -1,6 +1,6 @@
 # Cíle, postup a stav práce
 
-Stav k 4. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracovaný kód, úspěšný test a vydaná verze jsou samostatné stavy.
+Stav k 5. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracovaný kód, úspěšný test a vydaná verze jsou samostatné stavy.
 
 ## Cíle
 
@@ -32,6 +32,10 @@ Stav k 4. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - Nativní helper použitý při skutečných restartech měl SHA-256 `f9fb10540bd9b5b2d663c669a2e86a3c0d8bfad1b3b22dfd54286ad98e1aac69`. Toto je důkaz pro konkrétní testovaný artefakt; novější sestavení jej automaticky nepřebírá.
 - `f9974a7`: napojení registru a odděleného v2 feedu je commitnuté a odeslané; [CI 41926092184](https://github.com/nks-hub/libernt-update/actions/runs/41926092184) prošlo pro klienta i publisher. Samostatně prošlo také všech pět Linux testů sestavovacího skriptu.
 - Optimalizace shodných podepsaných referencí přeskočí stahování a rozebírání nepotřebného továrního registru. Na LiberNT prošlo 96 kontrol včetně testu s odstraněným objektem i cache; SHA-256 klienta je `62e7c79b8bf633b7f587bc8b2e7efcd23a45230891ab7b5b82fbb8eb3c0f9890`.
+- `21ae6e8`: optimalizace registru je odeslaná; [CI 41927512019](https://github.com/nks-hub/libernt-update/actions/runs/41927512019) prošlo pro klienta i publisher.
+- Nabídka ikony umí připnout a odepnout pouze vlastní ikonu. LiberNT potvrdil přesun mezi skrytými ikonami a panelem, zachování volby po ukončení aplikace i po normálním restartu celého systému a nezměněné nastavení ostatních existujících ikon.
+- Nabídka se vejde nad spodní lištu; skutečný [screenshot](SCREENSHOTS.md#tray-pin-preference) je z testu na LiberNT. Testovací proces je ukončený a jeho ikona opět odepnutá.
+- Klient s touto úpravou rozhraní prošel na LiberNT všemi 96 kontrolami. SHA-256 testovaného EXE: `81e83629ca58af4b8023e3d51c467e75c67f6711a5330a814df941ef119e9a71`. Tento běh nenahrazuje dřívější důkaz nativních operací při startu.
 
 ## Naměřený výkon registru
 
@@ -41,7 +45,7 @@ Při shodných podepsaných hashech se nyní tato práce neprovádí. Uvedená �
 
 ## Právě probíhá
 
-- Napojení továrních stavů registru na kontrolu, společnou transakci se soubory, potvrzení a rollback je implementované a otestované; změny zatím nejsou ve vydaném klientovi.
+- Registr i úprava ikony jsou implementované a otestované; změny zatím nejsou ve vydaném klientovi.
 - Ověření přechodu konkrétní starší provozní instalace; nový klient ani nový v2 feed zatím nejsou publikované.
 
 ## Důležité zjištění z testů
@@ -50,13 +54,15 @@ Původní `BootExecute` běží před `NtInitializeRegistry`. SOFTWARE ještě n
 
 Cppcheck s cestami a přepínači skutečného sestavení nenašel problém v novém `update.c`. V `sminit.c:957` hlásí původní `uninitvar`, který je i v předchozí revizi; tento nesouvisející úsek se neměnil.
 
+Kernel při každém startu zapisuje `FirmwareBootDevice` podle oddílu zavaděče a `SystemBootDevice` podle oddílu Windows. První údaj může pomoci s hledáním EFI oddílu, ale UEFI loader při neúspěšném hledání dosadí OS oddíl bez zvláštního příznaku. Proto samotné přečtení této hodnoty nestačí k bezpečné aktualizaci zavaděče. Je nutné ověřit oddíl i očekávaný loader; při rozporu nadále vyžadovat `bootRoot`.
+
 ## Zbývající práce
 
 - Ověřit přechod ze staršího klienta: důvěryhodnost datové složky, původní tovární stav registru a pořadí aktualizace SMSS a klienta.
 - Dořešit obnovu ovladačů, které spadnou dříve, než se updater spustí; samotná záloha jádra a HAL nestačí.
 - Dořešit nezávislou návratovou cestu při selhání nového zavaděče; kód ve spuštěném systému takové selhání sám neopraví.
+- Upřesnit, zda nezávislá obnova musí fungovat také na fyzickém počítači; rozhodnutí zatím chybí a postup obnovy není implementovaný.
 - Doplnit bezpečné určení EFI oddílu a ověřit skutečný UEFI boot po změně zavaděče.
-- Upravit práci s ikonou v liště při zachování uživatelovy volby připnutí; potom pořídit nové screenshoty.
 - Ověřit chybové HTTP scénáře nového feedu; současné regrese fallbacku používají místní feed.
 - Upřesnit release kanál pro testovaná a provozní vydání. Synchronizace fork zdrojů nepřebírá upstream GitHub Releases; vlastní binární vydání patří do stávajícího sestavovacího postupu.
 

@@ -113,6 +113,8 @@ Inside LiberNT, `LiberNTUpdate.exe` without arguments opens the window. The comm
 
 The program is a GUI-subsystem executable, so command-line output also goes to `%ProgramData%\LiberNTUpdate\cli-output.txt`; from `cmd.exe` run it with `start "" /wait LiberNTUpdate.exe /check`.
 
+When an update icon is present, right-click it and choose **Pin this icon** to keep it outside the overflow. The choice applies only to this icon and can be changed later in the same menu or by dragging it. Announcements use the system notification center.
+
 ## Releases
 
 - **Client** - pushing a tag `v*` builds the client with that version, runs the self-test and attaches `LiberNTUpdate.exe`, `luupboot.exe` and `SHA256SUMS` to a GitHub release (`.github/workflows/release.yml`).
@@ -141,7 +143,6 @@ nginx serves `feed/` read-only with `no-cache` on `feed.json` and long caching f
 - A boot-start driver that crashes before smss runs stops `luupboot.exe` too; the recovery entry starts the previous kernel and HAL but the new boot drivers. Take a VM snapshot before trying risky builds.
 - A new boot loader that does not start cannot be undone from inside the system; its backup stays in the transaction folder.
 - The boot partition must be identified by Setup or configured explicitly with `bootRoot`. Booting a UEFI machine after a loader update still requires platform testing.
-- In LiberNT's modern taskbar a new tray icon sits in the overflow until the user pins it, and announcements go to the notification center.
 
 ## Testing
 

@@ -103,6 +103,10 @@ Before replacing the client, every install path snapshots the running EXE and re
 | `boot/` | plans and state files of `luupboot.exe` |
 | `watchdog/` | copy of the running client for self-updates |
 
+## Tray pin preference
+
+The tray menu reads the current user's `Control Panel\NotifyIconSettings` entry for its own executable path and icon UID. It verifies both fields before changing `IsPromoted`, then recreates its own icon so Explorer reloads the preference. This uses LiberNT Explorer's settings format; the menu item is disabled when a matching entry is unavailable, and starting the tray does not overwrite the user's choice.
+
 ## Plan format
 
 UTF-16LE, one operation per line:

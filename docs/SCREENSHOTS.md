@@ -12,6 +12,12 @@ A client update is offered: one file changes. The buttons work from the keyboard
 
 Installing asks first; the current files are backed up before anything is replaced.
 
+## Tray pin preference
+
+![Tray pin menu](images/tray-pin-menu.png)
+
+The tray menu can pin or unpin its own icon without changing other icons. The screenshot was captured from the running tray UI test on LiberNT on 5 November 2026 and cropped without scaling. The full menu stays above the taskbar.
+
 # An update from upstream changes
 
 The rest of this page shows a Czech system. The update run was recorded on 3 November 2026 on a LiberNT amd64 VM (BIOS, 2 CPUs) running client v0.2.4. The window screenshots were refreshed with v0.2.8 on the same VM; the counts and log below remain those of the original run. The fork's `Sync upstream` workflow merged 30 upstream commits (up to `0a41bd8`, 65 changed source files) into `nks` as `cd663698bd`; `build-release.sh` built the image and published release `20261103-172154-cd663698bd`.
