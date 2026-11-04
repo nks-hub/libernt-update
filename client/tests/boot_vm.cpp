@@ -1,4 +1,5 @@
 // VM-only regression probe. It calls the real engine against an isolated journal; /kernel requires a VM snapshot.
+#include <winsock2.h>
 #include "../src/engine.cpp"
 #include <iostream>
 
@@ -29,6 +30,7 @@ static void PutObject(const Config& cfg, const std::string& text) {
 
 #include "registry_boot.inc"
 #include "tray_vm.inc"
+#include "feed_http_vm.inc"
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) return 2;
@@ -36,6 +38,7 @@ int wmain(int argc, wchar_t** argv) {
     g_dataOverride = ProbeBase() + L"\\data";
     Config cfg{L"file:///C:/lntu-review/feed/", ProbeBase() + L"\\root"};
     std::wstring error;
+    if (mode == L"feed-http") return RunFeedHttpTest();
     if (mode == L"tray-test") return RunTrayTest();
     if (mode == L"tray-launch" && argc == 3) return LaunchTrayTest(wcstoul(argv[2], nullptr, 10));
     if (mode == L"registry-snapshot" && argc == 3) {

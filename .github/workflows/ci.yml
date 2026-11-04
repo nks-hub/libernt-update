@@ -30,3 +30,9 @@ jobs:
           $p = Start-Process -FilePath client\out\LiberNTUpdate.exe -ArgumentList '/selftest' -Wait -PassThru
           Get-Content "$env:ProgramData\LiberNTUpdate\cli-output.txt"
           exit $p.ExitCode
+      - name: Build runtime probes
+        shell: cmd
+        run: client\tests\build_boot_vm.cmd
+      - name: HTTP feed tests
+        shell: cmd
+        run: client\out\boot_vm.exe feed-http

@@ -156,7 +156,16 @@ start "" /wait client\out\LiberNTUpdate.exe /selftest
 type %ProgramData%\LiberNTUpdate\cli-output.txt
 ```
 
-The client self-test covers SHA-256 and Ed25519 vectors, direct install, rollback (including a partly applied update), the boot plan as `luupboot.exe` applies it, the boot-failure and recovery-entry rollbacks, `/cancel`, and a full check against a signed local feed with kernel variants. CI runs both on every push.
+The client self-test covers SHA-256 and Ed25519 vectors, direct install, rollback (including a partly applied update), the boot plan as `luupboot.exe` applies it, the boot-failure and recovery-entry rollbacks, `/cancel`, and a full check against a signed local feed with kernel variants.
+
+The HTTP probe serves synthetic signed feeds on a temporary loopback port. It checks legacy fallback before v2 adoption, rejection of HTTP 403/500 and invalid signatures, prevention of a later protocol downgrade, and the response size limit:
+
+```bat
+client\tests\build_boot_vm.cmd
+client\out\boot_vm.exe feed-http
+```
+
+CI runs the publisher tests, client self-test and HTTP probe on every push. These checks do not replace boot and tray tests on LiberNT.
 
 ## Contributing
 

@@ -36,6 +36,9 @@ Stav k 5. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - Nabídka ikony umí připnout a odepnout pouze vlastní ikonu. LiberNT potvrdil přesun mezi skrytými ikonami a panelem, zachování volby po ukončení aplikace i po normálním restartu celého systému a nezměněné nastavení ostatních existujících ikon.
 - Nabídka se vejde nad spodní lištu; skutečný [screenshot](SCREENSHOTS.md#tray-pin-preference) je z testu na LiberNT. Testovací proces je ukončený a jeho ikona opět odepnutá.
 - Klient s touto úpravou rozhraní prošel na LiberNT všemi 96 kontrolami. SHA-256 testovaného EXE: `81e83629ca58af4b8023e3d51c467e75c67f6711a5330a814df941ef119e9a71`. Tento běh nenahrazuje dřívější důkaz nativních operací při startu.
+- `d102bde`: připnutí ikony, oprava nabídky a screenshot jsou odeslané; [CI 41934024700](https://github.com/nks-hub/libernt-update/actions/runs/41934024700) prošlo pro klienta i publisher.
+- Na LiberNT prošlo devět HTTP kontrol: přechod na starý feed pouze při 404 před přijetím v2, odmítnutí 403/500, chybějícího či nesprávného podpisu a neplatného JSON, přijetí v2, zákaz pozdějšího návratu na starý protokol a limit velikosti odpovědi. Test používá pouze dočasný port na `127.0.0.1` a syntetická data; nejde o veřejný aktualizační server.
+- HTTP testy prošly review a jsou součástí CI. SHA-256 testovaného helperu: `4bb1f43264385f27b599f07e88b1bb83077dc872305945f17094ac55cc1e7147`; výsledky dalších sestavení jsou v [CI](https://github.com/nks-hub/libernt-update/actions/workflows/ci.yml).
 
 ## Naměřený výkon registru
 
@@ -63,7 +66,6 @@ Kernel při každém startu zapisuje `FirmwareBootDevice` podle oddílu zavadě�
 - Dořešit nezávislou návratovou cestu při selhání nového zavaděče; kód ve spuštěném systému takové selhání sám neopraví.
 - Upřesnit, zda nezávislá obnova musí fungovat také na fyzickém počítači; rozhodnutí zatím chybí a postup obnovy není implementovaný.
 - Doplnit bezpečné určení EFI oddílu a ověřit skutečný UEFI boot po změně zavaděče.
-- Ověřit chybové HTTP scénáře nového feedu; současné regrese fallbacku používají místní feed.
 - Upřesnit release kanál pro testovaná a provozní vydání. Synchronizace fork zdrojů nepřebírá upstream GitHub Releases; vlastní binární vydání patří do stávajícího sestavovacího postupu.
 
 Nová klientská verze ani nový registry feed zatím nejsou publikované. Tento přehled není potvrzením, že všech pět omezení už zmizelo.
