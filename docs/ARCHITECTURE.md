@@ -70,7 +70,7 @@ The boot plan also supports `G` operations with desired and expected binary regi
 | `trial` without a plan | counts the boot; on the third unconfirmed boot applies `rollback.txt` and writes `rolledback` |
 | boot entry with `/LNTUROLLBACK` | applies `rollback.txt` at once (or drops a plan that has not run) |
 
-The first service start verifies the disk but retains recovery. The next boot must have a different kernel boot identity before the service confirms it. A durable `committed` marker disables boot actions before the plan directory is retired and `pending` is cleared.
+After applying a plan or a rollback, luupboot restarts the computer before smss continues. That boot still runs the previous kernel, smss and ntdll; starting csrss and the rest of the system from the replaced files on top of them crashed smss with a LiberNT release that changed 1546 files. The following boot starts entirely from the new files, and the service confirms it there because its kernel boot identity differs from the one that prepared the update. A durable `committed` marker disables boot actions before the plan directory is retired and `pending` is cleared.
 
 ## Rollback paths
 

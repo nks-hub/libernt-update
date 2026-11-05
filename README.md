@@ -90,7 +90,7 @@ start "" /wait "C:\Program Files\LiberNT Update\LiberNTUpdate.exe" /register
 | `restartHour` | local hour of the automatic restart for a pending update, `-1` never |
 | `language` | `cs` or `en`; without it the window, tray and messages follow the Windows UI language (Czech, otherwise English) |
 
-An update applied by `BootExecute` needs two restarts. The first replaces files after the old kernel has loaded; the second starts the new files. The recovery entry and rollback plan stay available until the second boot is confirmed. Restarting the service does not confirm a new boot. `/cancel` is accepted only before replacement starts.
+An update that replaces files in use needs one restart. During it `luupboot.exe` replaces the files and restarts the computer once more by itself, so no part of Windows runs on a mix of old and new files. The recovery entry and rollback plan stay available until the service confirms the new boot. Restarting the service does not confirm a new boot. `/cancel` is accepted only before replacement starts.
 
 ## Usage
 

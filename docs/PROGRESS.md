@@ -84,8 +84,11 @@ Při shodných podepsaných hashech se nyní tato práce neprovádí. Uvedená �
 
 ## Stav vydání
 
-- Registr i úprava ikony jsou implementované a otestované; změny zatím nejsou ve vydaném klientovi.
-- Testovaný klient je nyní nainstalovaný na VM. Stará složka umožňovala zápis běžným uživatelům; je archivovaná a její plány se nepoužívají. Nová složka má chráněná oprávnění a vychází z ověřeného feedu. Veřejné vydání klienta ani zapnutí v2 feedu tím neproběhlo.
+- Klient `v0.3.0` je vydaný jako stabilní (SHA-256 `a50d8a62614f28c3795dbb55896cd6d9fbd0846bf781edfaeb634f96e6b50455`, `luupboot.exe` `d4ec7524f0ab45c0821944e0b60a97eebe130082371c5b492354c232c5c01d2f`). Vydaný soubor prošel na LiberNT 128 kontrolami.
+- Feed obsahuje vydání `20261105-192830-ebe3308cdd`: LiberNT z `nks` s opravou jádra a klient `v0.3.0`. Kontrola feedu prošla bez chyby. Registry feed v2 zatím zveřejněný není.
+- Starší testovací instalace je přeinstalovaná z obrazu `5fccfb5`; staré instalace se podle README přeinstalují.
+- Chyba nalezená při první skutečné instalaci vydání `ebe3308` (1546 souborů včetně jádra, smss a ntdll) klientem `v0.3.0`: luupboot vyměnil všechny soubory bez chyby, ale start pak pokračoval se starým jádrem, starým smss a ntdll nad novými soubory a smss spadl (pád kritického procesu, debug build zůstal stát v debuggeru). Smazání značky `applying` se navíc nestihlo zapsat na disk, takže další start celou aktualizaci vrátil. Oprava: luupboot po každé výměně (aktualizace i návratu) hned restartuje, takže se nic nespustí nad smíšenými soubory a vynucený zápis při vypnutí uloží i stav plánu. Stejná instalace s opravou prošla napoprvé a služba ji potvrdila hned v dalším startu.
+- Ověřeno také, že LiberNT dovolí přejmenováním nahradit soubor, který je namapovaný jako obraz (Windows to odmítne), ale běžící proces dál čte původní obsah; příčinou pádu to nebylo.
 
 ## Důležité zjištění z testů
 
