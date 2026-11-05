@@ -15,6 +15,10 @@ jobs:
       LNTU_FEED_URL: http://libernt-update.nks-hub.cz/
     steps:
       - uses: actions/checkout@v4
+      - name: Validate version tag
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]] || { echo "Invalid client version tag" >&2; exit 1; }
       - run: client\build.cmd
         shell: cmd
       - name: Self-test
@@ -38,4 +42,9 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" client/out/LiberNTUpdate.exe client/out/luupboot.exe client/out/SHA256SUMS --title "$GITHUB_REF_NAME" --notes "Client $GITHUB_REF_NAME. Build machines pick it up with server/build-release.sh."
+        run: |
+          flags=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            flags+=(--prerelease --latest=false)
+          fi
+          gh release create "$GITHUB_REF_NAME" client/out/LiberNTUpdate.exe client/out/luupboot.exe client/out/SHA256SUMS --title "$GITHUB_REF_NAME" --notes "Client $GITHUB_REF_NAME. Build machines pick up stable releases with server/build-release.sh; testing requires an explicit CLIENT_TAG." "${flags[@]}"

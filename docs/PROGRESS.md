@@ -40,6 +40,7 @@ Stav k 5. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - Na LiberNT prošlo devět HTTP kontrol: přechod na starý feed pouze při 404 před přijetím v2, odmítnutí 403/500, chybějícího či nesprávného podpisu a neplatného JSON, přijetí v2, zákaz pozdějšího návratu na starý protokol a limit velikosti odpovědi. Test používá pouze dočasný port na `127.0.0.1` a syntetická data; nejde o veřejný aktualizační server.
 - HTTP testy prošly review a jsou součástí CI. SHA-256 testovaného helperu: `4bb1f43264385f27b599f07e88b1bb83077dc872305945f17094ac55cc1e7147`; výsledky dalších sestavení jsou v [CI](https://github.com/nks-hub/libernt-update/actions/workflows/ci.yml).
 - `1ff805e`: HTTP regrese a jejich napojení do CI jsou odeslané; [CI 41934672654](https://github.com/nks-hub/libernt-update/actions/runs/41934672654) prošlo včetně Windows běhu všech devíti HTTP kontrol.
+- Kanály vydání klienta: verze s příponou, například `v0.3.0-rc.1`, je GitHub prerelease a nenahradí stabilní latest. Běžný publisher odmítá draft i nevyžádanou předběžnou verzi; pro samostatný testovací feed lze zvolit přesný `CLIENT_TAG`. Devět Linux regresí publisher skriptu prošlo; nová verze tím není vydaná.
 
 ## Naměřený výkon registru
 
@@ -65,8 +66,7 @@ Kernel při každém startu zapisuje `FirmwareBootDevice` podle oddílu zavadě�
 - Ověřit přechod ze staršího klienta: důvěryhodnost datové složky, původní tovární stav registru a pořadí aktualizace SMSS a klienta.
 - Dořešit obnovu ovladačů, které spadnou dříve, než se updater spustí; samotná záloha jádra a HAL nestačí.
 - Dořešit nezávislou návratovou cestu při selhání nového zavaděče; kód ve spuštěném systému takové selhání sám neopraví.
-- Upřesnit, zda nezávislá obnova musí fungovat také na fyzickém počítači; rozhodnutí zatím chybí a postup obnovy není implementovaný.
+- Nezávislou obnovu řešit i pro fyzický počítač; samotný návrat snapshotu na hypervizoru tento cíl nesplní.
 - Doplnit bezpečné určení EFI oddílu a ověřit skutečný UEFI boot po změně zavaděče.
-- Upřesnit release kanál pro testovaná a provozní vydání. Synchronizace fork zdrojů nepřebírá upstream GitHub Releases; vlastní binární vydání patří do stávajícího sestavovacího postupu.
 
 Nová klientská verze ani nový registry feed zatím nejsou publikované. Tento přehled není potvrzením, že všech pět omezení už zmizelo.

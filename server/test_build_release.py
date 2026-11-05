@@ -90,6 +90,36 @@ class ReleaseChecks(unittest.TestCase):
         self.assertIn("source checkout is dirty", result.stderr)
         self.assertEqual(calls, [])
 
+    def test_unrequested_prerelease_is_not_published(self):
+        self.executable("curl", "printf '%s\\n' '{\"tag_name\":\"v0.0.1\",\"prerelease\":true}'\n")
+        result, calls = self.run_release()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
+    def test_explicit_tag_is_used_instead_of_latest(self):
+        self.env["CLIENT_TAG"] = "v0.0.1"
+        self.executable("curl", 'case "$*" in */releases/tags/v0.0.1) ;; *) exit 9 ;; esac\n'
+                                "printf '%s\\n' '{\"tag_name\":\"v0.0.1\",\"prerelease\":true}'\n")
+        result, calls = self.run_release()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls[0], "verify")
+
+    def test_wrong_explicit_tag_and_draft_are_rejected(self):
+        self.env["CLIENT_TAG"] = "v0.0.1"
+        for release in ({"tag_name": "v0.0.2"}, {"tag_name": "v0.0.1", "draft": True}):
+            with self.subTest(release=release):
+                self.executable("curl", "printf '%s\\n' '" + json.dumps(release) + "'\n")
+                result, calls = self.run_release()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(calls, [])
+
+    def test_unsafe_requested_tag_is_rejected_before_curl(self):
+        self.env["CLIENT_TAG"] = "v0.0.1/../../latest"
+        self.executable("curl", 'echo CURL >> "$CALL_LOG"\nexit 9\n')
+        result, calls = self.run_release()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

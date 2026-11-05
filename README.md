@@ -117,7 +117,7 @@ When an update icon is present, right-click it and choose **Pin this icon** to k
 
 ## Releases
 
-- **Client** - pushing a tag `v*` builds the client with that version, runs the self-test and attaches `LiberNTUpdate.exe`, `luupboot.exe` and `SHA256SUMS` to a GitHub release (`.github/workflows/release.yml`).
+- **Client** - a version tag such as `v0.3.0` builds and publishes a stable client; `v0.3.0-rc.1` publishes a prerelease without changing GitHub's latest stable release. Both carry `LiberNTUpdate.exe`, `luupboot.exe` and `SHA256SUMS` (`.github/workflows/release.yml`).
 - **System** - `server/build-release.sh` fetches branch `nks` of nks-hub/LiberNT and the newest client release (checked against `SHA256SUMS`), runs `ninja liberntimg` and publishes when the LiberNT commit or the client version is new. With `FEED_PUSH=user@host:` it copies the feed to the update server with rsync, objects first and the signed `feed.json` last. `server/systemd/luup-release.timer` runs it daily at 04:30 UTC, after the fork's GitHub workflow has merged upstream `main-nt10` into `nks` at 03:17 UTC.
 
 ```sh

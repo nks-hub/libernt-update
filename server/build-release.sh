@@ -13,11 +13,25 @@ FEED_PUSH=${FEED_PUSH:-}
 PUSH_KEY=${PUSH_KEY:-/root/.ssh/luup_push}
 CLIENT_REPO=${CLIENT_REPO:-nks-hub/libernt-update}
 CLIENT_CACHE=${CLIENT_CACHE:-/var/cache/luup/client}
+CLIENT_TAG=${CLIENT_TAG:-}
 
 # Prints the folder with the newest client release; cached files are checked on every run.
 fetch_client() {
-    tag=$(curl -fsSL "https://api.github.com/repos/$CLIENT_REPO/releases/latest" |
-          python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+    endpoint=latest
+    if [ -n "$CLIENT_TAG" ]; then
+        case "$CLIENT_TAG" in v[0-9]* ) ;; * ) echo "invalid requested client tag" >&2; exit 1 ;; esac
+        case "$CLIENT_TAG" in *[!a-zA-Z0-9._-]* ) echo "unsafe requested client tag" >&2; exit 1 ;; esac
+        endpoint="tags/$CLIENT_TAG"
+    fi
+    tag=$(curl -fsSL "https://api.github.com/repos/$CLIENT_REPO/releases/$endpoint" |
+          python3 -c 'import json,sys
+r=json.load(sys.stdin)
+requested=sys.argv[1]
+if r.get("draft") or (r.get("prerelease") and not requested):
+    raise SystemExit("refusing a draft or an unrequested client prerelease")
+if requested and r.get("tag_name") != requested:
+    raise SystemExit("client release does not match the requested tag")
+print(r["tag_name"])' "$CLIENT_TAG")
     case "$tag" in v[0-9]* ) ;; * ) echo "invalid client release tag" >&2; exit 1 ;; esac
     case "$tag" in *[!a-zA-Z0-9._-]* ) echo "unsafe client release tag" >&2; exit 1 ;; esac
     dir="$CLIENT_CACHE/$tag"

@@ -7,6 +7,14 @@
 3. `release.yml` builds with `LNTU_VERSION=v0.2.5`, runs the self-test, checks `/version` and attaches `LiberNTUpdate.exe`, `luupboot.exe` and `SHA256SUMS` to the GitHub release.
 4. The next run of `build-release.sh` picks the release up (`releases/latest`), checks `SHA256SUMS` and publishes a feed release with it.
 
+Tags with a prerelease suffix, such as `v0.3.0-rc.1`, are marked as GitHub prereleases and never replace the latest stable release. The automatic build rejects drafts and unrequested prereleases. To test a particular published client, set `CLIENT_TAG` and use a separate feed directory and push destination:
+
+```sh
+CLIENT_TAG=v0.3.0-rc.1 FEED=/srv/luup-testing FEED_PUSH= ./build-release.sh
+```
+
+For an existing installation, first seed that private testing directory from a verified copy of its current feed so it retains the installed release and registry baseline. Serve it at a separate URL and set the test client's `feedUrl` to that URL. The example does not push to the update server. These are client release channels; OS source synchronization and image builds keep their existing schedule. Switching a tested installation back to a stable feed still requires that feed to contain its recorded release history; an older feed is refused.
+
 ## Release a new LiberNT build
 
 `build-release.sh` runs from `luup-release.timer` every day. To publish at once:
