@@ -9,8 +9,10 @@ static bool IsOfflineVictim(const VolumeIdentity& volume) {
         nullptr, 0, buffer, sizeof buffer, &bytes, nullptr);
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     auto layout = (const DRIVE_LAYOUT_INFORMATION_EX*)buffer;
+    static const GUID gptCopy = {0x4c555550, 0x0000, 0x4000, {0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}};
     return ok && bytes >= FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry) &&
-           layout->PartitionStyle == PARTITION_STYLE_MBR && layout->Mbr.Signature == 0x4c555550;
+           ((layout->PartitionStyle == PARTITION_STYLE_MBR && layout->Mbr.Signature == 0x4c555550) ||
+            (layout->PartitionStyle == PARTITION_STYLE_GPT && IsEqualGUID(layout->Gpt.DiskId, gptCopy)));
 }
 
 static bool WriteMappedValue(RegistryItem item, OfflineHives& hives, std::wstring& error) {
@@ -43,6 +45,43 @@ static int OfflineVmProbe(const std::wstring& mode) {
         g_migrationData = L"E:\\ProgramData\\LiberNTUpdate";
         if (GetFileAttributesW(DataDir().c_str()) == INVALID_FILE_ATTRIBUTES && !CreateUpdateDataDirectory(DataDir(), error)) return 1;
         std::cout << "PASS victim drive mapping and protected updater directory prepared\n";
+        return 0;
+    }
+    if (mode == L"offline-gpt-setup") {
+        // Maps C: to the GPT copy of the victim disk; refused for any other disk GUID.
+        static const GUID diskId = {0x4c555550, 0x0000, 0x4000, {0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01}};
+        std::wstring root = L"F:\\";
+        if (!ReadVolumeIdentity(root, target) || target.disk == current.disk) return 1;
+        std::wstring raw = target.root;
+        raw.pop_back();
+        HANDLE volume = CreateFileW(raw.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        PARTITION_INFORMATION_EX part{};
+        DWORD bytes = 0;
+        bool ok = volume != INVALID_HANDLE_VALUE &&
+                  DeviceIoControl(volume, IOCTL_DISK_GET_PARTITION_INFO_EX, nullptr, 0, &part, sizeof part, &bytes, nullptr);
+        if (volume != INVALID_HANDLE_VALUE) CloseHandle(volume);
+        auto device = L"\\\\?\\GLOBALROOT\\GLOBAL??\\PhysicalDrive" + std::to_wstring(target.disk);
+        HANDLE disk = CreateFileW(device.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        alignas(DRIVE_LAYOUT_INFORMATION_EX) BYTE layoutBuffer[4096]{};
+        ok = ok && disk != INVALID_HANDLE_VALUE && DeviceIoControl(disk, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, nullptr, 0,
+                                                                   layoutBuffer, sizeof layoutBuffer, &bytes, nullptr);
+        if (disk != INVALID_HANDLE_VALUE) CloseHandle(disk);
+        auto layout = (const DRIVE_LAYOUT_INFORMATION_EX*)layoutBuffer;
+        std::vector<uint8_t> marker;
+        if (!ok || part.PartitionStyle != PARTITION_STYLE_GPT || layout->PartitionStyle != PARTITION_STYLE_GPT ||
+            !IsEqualGUID(layout->Gpt.DiskId, diskId) || !ReadFileBytes(root + L"lntu-offline-victim.txt", marker) ||
+            std::string(marker.begin(), marker.end()) != Narrow(kOfflineVictim)) {
+            std::cout << "FAIL not the GPT test copy\n";
+            return 1;
+        }
+        RecoveryPrivileges privileges(error);
+        OfflineHives hives(target.root);
+        if (!privileges) return 1;
+        RegistryItem drive{L"\\Registry\\Machine\\SYSTEM\\MountedDevices", L"\\DosDevices\\C:", false, true, REG_BINARY,
+                           {'D', 'M', 'I', 'O', ':', 'I', 'D', ':'}};
+        drive.data.insert(drive.data.end(), (const uint8_t*)&part.Gpt.PartitionId, (const uint8_t*)&part.Gpt.PartitionId + sizeof(GUID));
+        if (!WriteMappedValue(drive, hives, error) || !hives.Unload(error)) { std::cout << Narrow(error); return 1; }
+        std::cout << "PASS C: of the GPT copy mapped to its partition GUID\n";
         return 0;
     }
     if (mode == L"offline-log-test" || mode == L"offline-orphan-mount" || mode == L"offline-orphan-retry" || mode == L"offline-orphan-cleared") {
@@ -150,6 +189,54 @@ static int OfflineVmProbe(const std::wstring& mode) {
                   InstalledRelease() == "RecoveryBefore" && PendingTransaction().empty();
         std::cout << (ok ? "PASS " : "FAIL ") << "UEFI loaders and BCD restored; installed="
                   << InstalledRelease() << " pending=" << PendingTransaction() << "\n";
+        return ok ? 0 : 1;
+    }
+    // A protected, loaded but non-critical driver: the native helper replaces and restores it across real restarts.
+    if (mode.rfind(L"offline-protected-", 0) == 0) {
+        const std::wstring beep = L"C:\\Windows\\System32\\drivers\\beep.sys";
+        auto sddl = [&]() {
+            std::vector<BYTE> sd(4096);
+            DWORD need = 0;
+            LPWSTR text = nullptr;
+            std::string result;
+            const SECURITY_INFORMATION what = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+            if (GetFileSecurityW(beep.c_str(), what, sd.data(), (DWORD)sd.size(), &need) &&
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(sd.data(), SDDL_REVISION_1, what, &text, nullptr)) result = Narrow(text);
+            if (text) LocalFree(text);
+            return result;
+        };
+        auto metadata = JoinPath(DataDir(), L"protected.json");
+        if (mode == L"offline-protected-prepare") {
+            std::vector<uint8_t> data;
+            if (!PendingTransaction().empty() || InstalledRelease() != "RecoveryBefore" || !ReadFileBytes(beep, data)) return 1;
+            std::string before = Sha256Hex(data.data(), data.size()), acl = sddl();
+            if (acl.find("O:S-1-5-80-956008885") != 0 || !ChangeLoaderFixture(data)) { std::cout << "FAIL fixture " << acl << "\n"; return 1; }
+            std::string after = Sha256Hex(data.data(), data.size());
+            if (!WriteFileAtomic(JoinPath(DataDir(), L"feed\\objects\\" + Widen(after.substr(0, 2)) + L"\\" + Widen(after)), data.data(), data.size()) ||
+                !SaveJson(metadata, json{{"before", before}, {"after", after}, {"acl", acl}})) return 1;
+            CheckResult update;
+            update.installed = "RecoveryBefore";
+            update.latest.id = "RecoveryProtected";
+            update.changes = {{"Windows/system32/drivers/beep.sys", after, data.size(), before}};
+            auto outcome = InstallUpdate(cfg, update, error, nullptr);
+            std::cout << (outcome == InstallOutcome::PendingRestart ? "PASS " : "FAIL ") << Narrow(error) << " acl=" << acl << "\n";
+            return outcome == InstallOutcome::PendingRestart ? 0 : 1;
+        }
+        auto saved = LoadJson(metadata, json::object());
+        if (saved.empty()) return 1;
+        if (mode == L"offline-protected-rollback") {
+            auto outcome = RollbackLast(cfg, error, nullptr);
+            std::cout << (outcome == InstallOutcome::PendingRestart ? "PASS " : "FAIL ") << Narrow(error) << "\n";
+            return outcome == InstallOutcome::PendingRestart ? 0 : 1;
+        }
+        bool rollback = mode.find(L"rollback") != std::wstring::npos, first = mode.find(L"first") != std::wstring::npos;
+        bool finalized = PendingTransaction().empty() || FinalizePending(cfg, error);
+        std::string hash = Sha256File(beep), acl = sddl();
+        bool ok = finalized && hash == saved.value(rollback ? "before" : "after", "") && acl == saved.value("acl", "") &&
+                  (first ? !PendingTransaction().empty()
+                         : PendingTransaction().empty() && InstalledRelease() == (rollback ? "RecoveryBefore" : "RecoveryProtected"));
+        std::cout << (ok ? "PASS " : "FAIL ") << Narrow(mode) << " beep.sys=" << hash << " aclKept=" << (acl == saved.value("acl", ""))
+                  << " installed=" << InstalledRelease() << " pending=" << PendingTransaction() << " " << Narrow(error) << "\n";
         return ok ? 0 : 1;
     }
     // LiberNT does not start a newly registered Start=0 driver, so this replaces disk.sys, which the loader always loads.

@@ -68,7 +68,10 @@ Stav k 5. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - Pád aktualizovaného boot ovladače: transakce nahradila chráněný `disk.sys` testovacím ovladačem. Nativní helper ho při startu vyměnil se zachováním práv; další start skončil pádem `0xE2` ve `Phase1Initialization`, ještě před SMSS. Obnova z druhého systému vrátila původní `disk.sys` včetně vlastníka a pravidel přístupu a cílový systém normálně nabootoval.
 - Nově zaregistrovaný ovladač se Start=0 LiberNT při startu nespustí, ověřeno i neškodným ovladačem. Jde o chování OS; aktualizace existujícího boot ovladače se načte a byla otestována výše.
 - Finální klient prošel úplnou aktualizací a rollbackem obou EFI zavaděčů a souboru na NTFS přes čtyři skutečné restarty. Na obou testovacích instalacích prošlo 127 kontrol a 9 HTTP kontrol bez chyby. SHA-256 testovaného klienta `52d88bf4e33d9edc39910f32e3b4bc03f8cf8b61d6cbb6fa3a8e0dbde580b68c`, nativního helperu `998fce5795a529e3e828e54db6c904d3b671d9678a100463d3a59f45c97bc4f6`. Windows CI odhalilo, že správce mimo účet SYSTEM chráněný soubor nesmazal; dočasné právo proto dostává i skupina Administrators. Opravený klient `e3db0160449290021825d895debb6e27e4875efbb3bb14d38764b81e4b39c0d6` prošel na obou instalacích 127 kontrolami.
-- Testy proběhly ve VM s OVMF, diskem MBR a vypnutým Secure Boot. Fyzický UEFI počítač, GPT a Secure Boot ověřené nejsou. Testovací ovladač a poškozování zavaděče jsou jen v testovacím helperu, ne v běžném sestavení.
+- Chráněný a načtený ovladač `beep.sys` prošel s finálním nativním helperem aktualizací, potvrzením, rollbackem a potvrzením rollbacku přes čtyři skutečné restarty; hash i vlastník a pravidla přístupu odpovídaly v každém kroku.
+- GPT: přesná kopie testovacího disku byla převedena na GPT a v jejím BCD i v `MountedDevices` byly odkazy přepsány na GUID oddílů. LiberNT z ní nabootoval a updater určil ESP podle typu GPT oddílu; prošlo osm kontrol detekce, aktualizace a rollback obou zavaděčů přes čtyři restarty i poškození zavaděčů s obnovou z druhého systému. Kopie zůstává jako nepřipojený disk testovací VM.
+- Secure Boot: zavaděče LiberNT nemají podpis Authenticode. OVMF s předinstalovanými klíči je odmítl („Access Denied“) a LiberNT vůbec nenastartoval, takže aktualizaci v tomto režimu nelze provést ani testovat. Původní EFI disk VM je vrácený.
+- Testy proběhly ve VM s OVMF a vypnutým Secure Boot na discích MBR i GPT. Fyzický UEFI počítač ověřený není. Testovací ovladač a poškozování zavaděče jsou jen v testovacím helperu, ne v běžném sestavení.
 
 ## Naměřený výkon registru
 
@@ -94,8 +97,8 @@ Kernel při každém startu zapisuje `FirmwareBootDevice` podle oddílu zavadě�
 ## Zbývající práce
 
 - Soukromý testovací v2 feed (16 vydání) prošel ověřením podpisu i všech objektů. Plán první migrace registru z továrního základu `9d41077` na `5fccfb5` byl na starší instalaci spočítaný jen pro čtení: 11 nových klíčů a hodnot v SOFTWARE (ovladač OpenGL a náhrady písem), jedna místní změna zachovaná, nic k odstranění. Stejný výsledek dala úplná kontrola klientem se samostatnou datovou složkou: ověřený podpis v2 feedu, manifesty a oba objekty registru, potvrzená podpora `UpdateExecute` v SMSS. Plán zatím nebyl aplikován a v2 feed není veřejný.
-- Ověřit nezávislou obnovu na fyzickém počítači, s GPT a se Secure Boot; ve VM už prošla po pádu ovladače i po poškození zavaděče.
+- Ověřit aktualizaci EFI a nezávislou obnovu na fyzickém UEFI počítači; ve VM prošly na MBR i GPT.
 - V LiberNT zjistit, proč se nově zaregistrovaný ovladač se Start=0 při startu nespustí.
-- Doplnit běhové ověření EFI na GPT a fyzickém počítači; automatické určení a skutečný boot po změně i návratu zavaděče na OVMF/MBR už prošly.
+- Secure Boot vyžaduje podepsané zavaděče LiberNT; to je úkol sestavení OS, ne updateru.
 
 Nová klientská verze ani nový registry feed zatím nejsou publikované. Tento přehled není potvrzením, že všech pět omezení už zmizelo.
