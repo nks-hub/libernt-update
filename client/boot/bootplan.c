@@ -191,6 +191,9 @@ static NTSTATUS SetSecurity(PCWSTR ntPath, ACCESS_MASK access, SECURITY_INFORMAT
  * does not grant DELETE there. Takes ownership, lets SYSTEM delete the file and returns its original descriptor. */
 static NTSTATUS UnlockProtected(PCWSTR ntPath, PSECURITY_DESCRIPTOR* original) {
     static SID system = {SID_REVISION, 1, SECURITY_NT_AUTHORITY, {SECURITY_LOCAL_SYSTEM_RID}};
+    /* The boot helper runs as SYSTEM, offline recovery as an elevated administrator. */
+    static struct { BYTE Revision, Count; SID_IDENTIFIER_AUTHORITY Authority; DWORD Sub[2]; } administrators = {
+        SID_REVISION, 2, SECURITY_NT_AUTHORITY, {SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS}};
     UNICODE_STRING us;
     OBJECT_ATTRIBUTES oa;
     IO_STATUS_BLOCK iosb;
@@ -212,6 +215,7 @@ static NTSTATUS UnlockProtected(PCWSTR ntPath, PSECURITY_DESCRIPTOR* original) {
     if (NT_SUCCESS(st)) st = RtlSetOwnerSecurityDescriptor(&grant, &system, FALSE);
     if (NT_SUCCESS(st)) st = RtlCreateAcl((PACL)aclBuffer, sizeof(aclBuffer), ACL_REVISION);
     if (NT_SUCCESS(st)) st = RtlAddAccessAllowedAce((PACL)aclBuffer, ACL_REVISION, FILE_ALL_ACCESS, &system);
+    if (NT_SUCCESS(st)) st = RtlAddAccessAllowedAce((PACL)aclBuffer, ACL_REVISION, FILE_ALL_ACCESS, (PSID)&administrators);
     if (NT_SUCCESS(st)) st = RtlSetDaclSecurityDescriptor(&grant, TRUE, (PACL)aclBuffer, FALSE);
     if (NT_SUCCESS(st)) st = SetSecurity(ntPath, WRITE_OWNER, OWNER_SECURITY_INFORMATION, &grant);
     if (NT_SUCCESS(st)) st = SetSecurity(ntPath, WRITE_DAC, DACL_SECURITY_INFORMATION, &grant);
