@@ -49,6 +49,21 @@ NTSYSAPI NTSTATUS NTAPI NtQueryInformationFile(HANDLE, PIO_STATUS_BLOCK, PVOID, 
 NTSYSAPI NTSTATUS NTAPI NtAllocateVirtualMemory(HANDLE, PVOID*, ULONG_PTR, PSIZE_T, ULONG, ULONG);
 NTSYSAPI NTSTATUS NTAPI NtFreeVirtualMemory(HANDLE, PVOID*, PSIZE_T, ULONG);
 NTSYSAPI NTSTATUS NTAPI NtQueryAttributesFile(POBJECT_ATTRIBUTES, PVOID);
+NTSYSAPI NTSTATUS NTAPI NtQuerySecurityObject(HANDLE, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, ULONG, PULONG);
+NTSYSAPI NTSTATUS NTAPI NtSetSecurityObject(HANDLE, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR);
+NTSYSAPI NTSTATUS NTAPI RtlAdjustPrivilege(ULONG, BOOLEAN, BOOLEAN, PBOOLEAN);
+NTSYSAPI NTSTATUS NTAPI RtlCreateSecurityDescriptor(PSECURITY_DESCRIPTOR, ULONG);
+NTSYSAPI NTSTATUS NTAPI RtlSetOwnerSecurityDescriptor(PSECURITY_DESCRIPTOR, PSID, BOOLEAN);
+NTSYSAPI NTSTATUS NTAPI RtlSetDaclSecurityDescriptor(PSECURITY_DESCRIPTOR, BOOLEAN, PACL, BOOLEAN);
+NTSYSAPI NTSTATUS NTAPI RtlCreateAcl(PACL, ULONG, ULONG);
+NTSYSAPI NTSTATUS NTAPI RtlAddAccessAllowedAce(PACL, ULONG, ACCESS_MASK, PSID);
+
+#ifndef FILE_OPEN_FOR_BACKUP_INTENT
+#define FILE_OPEN_FOR_BACKUP_INTENT 0x00004000
+#endif
+#define LUUP_SE_TAKE_OWNERSHIP 9
+#define LUUP_SE_RESTORE 18
+#define LUUP_FILE_SECURITY (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION)
 
 static void Fill(void* p, unsigned char v, SIZE_T n) {
     volatile unsigned char* b = (volatile unsigned char*)p;
@@ -157,7 +172,69 @@ static NTSTATUS ClearReadOnly(PCWSTR ntPath) {
     return st;
 }
 
-NTSTATUS LuupDeleteFile(PCWSTR ntPath) {
+static NTSTATUS SetSecurity(PCWSTR ntPath, ACCESS_MASK access, SECURITY_INFORMATION what, PSECURITY_DESCRIPTOR sd) {
+    UNICODE_STRING us;
+    OBJECT_ATTRIBUTES oa;
+    IO_STATUS_BLOCK iosb;
+    HANDLE h;
+    NTSTATUS st;
+    InitPath(&us, &oa, ntPath);
+    st = NtOpenFile(&h, access | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT);
+    if (!NT_SUCCESS(st)) return st;
+    st = NtSetSecurityObject(h, what, sd);
+    NtClose(h);
+    return st;
+}
+
+/* LiberNT installs system files owned by TrustedInstaller with read-only access for SYSTEM, and SeRestorePrivilege
+ * does not grant DELETE there. Takes ownership, lets SYSTEM delete the file and returns its original descriptor. */
+static NTSTATUS UnlockProtected(PCWSTR ntPath, PSECURITY_DESCRIPTOR* original) {
+    static SID system = {SID_REVISION, 1, SECURITY_NT_AUTHORITY, {SECURITY_LOCAL_SYSTEM_RID}};
+    UNICODE_STRING us;
+    OBJECT_ATTRIBUTES oa;
+    IO_STATUS_BLOCK iosb;
+    HANDLE h;
+    SECURITY_DESCRIPTOR grant;
+    ULONG aclBuffer[32], size = 0;
+    NTSTATUS st;
+
+    *original = NULL;
+    InitPath(&us, &oa, ntPath);
+    st = NtOpenFile(&h, READ_CONTROL | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    if (!NT_SUCCESS(st)) return st;
+    NtQuerySecurityObject(h, LUUP_FILE_SECURITY, NULL, 0, &size);
+    *original = size ? Alloc(size) : NULL;
+    st = *original ? NtQuerySecurityObject(h, LUUP_FILE_SECURITY, *original, size, &size) : LUUP_STATUS_NO_MEMORY;
+    NtClose(h);
+    if (NT_SUCCESS(st)) st = RtlCreateSecurityDescriptor(&grant, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(st)) st = RtlSetOwnerSecurityDescriptor(&grant, &system, FALSE);
+    if (NT_SUCCESS(st)) st = RtlCreateAcl((PACL)aclBuffer, sizeof(aclBuffer), ACL_REVISION);
+    if (NT_SUCCESS(st)) st = RtlAddAccessAllowedAce((PACL)aclBuffer, ACL_REVISION, FILE_ALL_ACCESS, &system);
+    if (NT_SUCCESS(st)) st = RtlSetDaclSecurityDescriptor(&grant, TRUE, (PACL)aclBuffer, FALSE);
+    if (NT_SUCCESS(st)) st = SetSecurity(ntPath, WRITE_OWNER, OWNER_SECURITY_INFORMATION, &grant);
+    if (NT_SUCCESS(st)) st = SetSecurity(ntPath, WRITE_DAC, DACL_SECURITY_INFORMATION, &grant);
+    if (!NT_SUCCESS(st) && *original) {
+        SetSecurity(ntPath, WRITE_OWNER | WRITE_DAC, LUUP_FILE_SECURITY, *original);
+        LuupFree(*original);
+        *original = NULL;
+    }
+    return st;
+}
+
+static void ProtectedPrivileges(BOOLEAN enable, BOOLEAN saved[2]) {
+    BOOLEAN previous;
+    if (enable) {
+        if (!NT_SUCCESS(RtlAdjustPrivilege(LUUP_SE_TAKE_OWNERSHIP, TRUE, FALSE, &saved[0]))) saved[0] = TRUE;
+        if (!NT_SUCCESS(RtlAdjustPrivilege(LUUP_SE_RESTORE, TRUE, FALSE, &saved[1]))) saved[1] = TRUE;
+    } else {
+        if (!saved[0]) RtlAdjustPrivilege(LUUP_SE_TAKE_OWNERSHIP, FALSE, FALSE, &previous);
+        if (!saved[1]) RtlAdjustPrivilege(LUUP_SE_RESTORE, FALSE, FALSE, &previous);
+    }
+}
+
+static NTSTATUS DeleteOnce(PCWSTR ntPath) {
     UNICODE_STRING us;
     OBJECT_ATTRIBUTES oa;
     IO_STATUS_BLOCK iosb;
@@ -165,7 +242,6 @@ NTSTATUS LuupDeleteFile(PCWSTR ntPath) {
     BOOLEAN del = TRUE;
     NTSTATUS st;
 
-    ClearReadOnly(ntPath);
     InitPath(&us, &oa, ntPath);
     st = NtOpenFile(&h, DELETE | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
@@ -173,6 +249,25 @@ NTSTATUS LuupDeleteFile(PCWSTR ntPath) {
     if (!NT_SUCCESS(st)) return st;
     st = NtSetInformationFile(h, &iosb, &del, sizeof(del), LUUP_FileDispositionInformation);
     NtClose(h);
+    return st;
+}
+
+NTSTATUS LuupDeleteFile(PCWSTR ntPath) {
+    PSECURITY_DESCRIPTOR original;
+    BOOLEAN saved[2];
+    NTSTATUS st;
+
+    ClearReadOnly(ntPath);
+    st = DeleteOnce(ntPath);
+    if (st != STATUS_ACCESS_DENIED) return st;
+    ProtectedPrivileges(TRUE, saved);
+    st = UnlockProtected(ntPath, &original);
+    if (NT_SUCCESS(st)) {
+        st = DeleteOnce(ntPath);
+        if (!NT_SUCCESS(st)) SetSecurity(ntPath, WRITE_OWNER | WRITE_DAC, LUUP_FILE_SECURITY, original);
+        LuupFree(original);
+    }
+    ProtectedPrivileges(FALSE, saved);
     return st;
 }
 
@@ -299,7 +394,8 @@ static NTSTATUS GuardedReplace(PCWSTR source, PCWSTR target, PCWSTR expected) {
     return st;
 }
 
-static NTSTATUS RenameOnce(PCWSTR from, PCWSTR to, BOOLEAN replace) {
+/* With security, the moved file takes it over first; the open DELETE handle survives the stricter descriptor. */
+static NTSTATUS RenameOnce(PCWSTR from, PCWSTR to, BOOLEAN replace, PSECURITY_DESCRIPTOR security) {
     UNICODE_STRING us;
     OBJECT_ATTRIBUTES oa;
     IO_STATUS_BLOCK iosb;
@@ -310,8 +406,16 @@ static NTSTATUS RenameOnce(PCWSTR from, PCWSTR to, BOOLEAN replace) {
     LUUP_RENAME_INFO* info;
 
     InitPath(&us, &oa, from);
-    st = NtOpenFile(&h, DELETE | SYNCHRONIZE, &oa, &iosb, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT);
+    st = NtOpenFile(&h, DELETE | SYNCHRONIZE | (security ? WRITE_DAC | WRITE_OWNER : 0), &oa, &iosb,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT | (security ? FILE_OPEN_FOR_BACKUP_INTENT : 0));
     if (!NT_SUCCESS(st)) return st;
+    if (security) {
+        st = NtSetSecurityObject(h, LUUP_FILE_SECURITY, security);
+        if (!NT_SUCCESS(st)) {
+            NtClose(h);
+            return st;
+        }
+    }
     info = (LUUP_RENAME_INFO*)Alloc(infoSize);
     if (!info) {
         NtClose(h);
@@ -328,10 +432,22 @@ static NTSTATUS RenameOnce(PCWSTR from, PCWSTR to, BOOLEAN replace) {
 }
 
 NTSTATUS LuupRenameFile(PCWSTR from, PCWSTR to, BOOLEAN replace) {
-    NTSTATUS st = RenameOnce(from, to, replace);
+    PSECURITY_DESCRIPTOR original;
+    BOOLEAN saved[2];
+    NTSTATUS st = RenameOnce(from, to, replace, NULL);
     /* A read-only target refuses to be replaced: same recovery as smss for PendingFileRenameOperations. */
     if (replace && (st == STATUS_ACCESS_DENIED || st == STATUS_OBJECT_NAME_COLLISION) && NT_SUCCESS(ClearReadOnly(to)))
-        st = RenameOnce(from, to, replace);
+        st = RenameOnce(from, to, replace, NULL);
+    if (!replace || st != STATUS_ACCESS_DENIED) return st;
+    /* A protected system file: the replacement keeps its owner and access rules. */
+    ProtectedPrivileges(TRUE, saved);
+    st = UnlockProtected(to, &original);
+    if (NT_SUCCESS(st)) {
+        st = RenameOnce(from, to, TRUE, original);
+        if (!NT_SUCCESS(st)) SetSecurity(to, WRITE_OWNER | WRITE_DAC, LUUP_FILE_SECURITY, original);
+        LuupFree(original);
+    }
+    ProtectedPrivileges(FALSE, saved);
     return st;
 }
 

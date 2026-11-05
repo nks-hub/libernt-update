@@ -77,8 +77,8 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
             if (have == op.oldSha) continue;
             bool ownAside = have.empty() && IsClientFile(op.path) && Sha256File(target + L".old-" + Widen(tx)) == op.oldSha;
             if (have != op.newSha && !ownAside) { conflicts++; continue; }
-            if ((!op.backup.empty() && (Sha256File(op.backup) != op.oldSha || !CopyFileW(op.backup.c_str(), target.c_str(), FALSE))) ||
-                (op.backup.empty() && !DeleteFileW(target.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND)) {
+            if ((!op.backup.empty() && (Sha256File(op.backup) != op.oldSha || !CopyIntoPlace(op.backup, target))) ||
+                (op.backup.empty() && !RemoveTarget(target))) {
                 message = L"Interrupted installation needs recovery: " + Widen(op.path);
                 return true;
             }

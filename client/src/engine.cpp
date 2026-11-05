@@ -227,6 +227,26 @@ std::vector<Op> OpsFromJson(const json& a) {
 
 #include "engine_registry.inc"
 
+// Protected system files refuse plain writes; the native rename and delete take ownership and keep their access rules.
+static bool MoveIntoPlace(const std::wstring& source, const std::wstring& target) {
+    return MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) ||
+           (GetLastError() == ERROR_ACCESS_DENIED && NT_SUCCESS(LuupRenameFile(NtPath(source).c_str(), NtPath(target).c_str(), TRUE)));
+}
+
+static bool CopyIntoPlace(const std::wstring& source, const std::wstring& target) {
+    if (CopyFileW(source.c_str(), target.c_str(), FALSE)) return true;
+    if (GetLastError() != ERROR_ACCESS_DENIED) return false;
+    std::wstring temporary = target + L".lntu-new";
+    if (CopyFileW(source.c_str(), temporary.c_str(), FALSE) && MoveIntoPlace(temporary, target)) return true;
+    LuupDeleteFile(NtPath(temporary).c_str());
+    return false;
+}
+
+static bool RemoveTarget(const std::wstring& target) {
+    return DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND ||
+           (GetLastError() == ERROR_ACCESS_DENIED && NT_SUCCESS(LuupDeleteFile(NtPath(target).c_str())));
+}
+
 /// Puts back the backups of the ops already applied (in reverse) after a failure in the middle. Every step goes to
 /// update.log; the returned text is empty when all files are back and names the ones that are not otherwise.
 std::wstring UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t applied, const std::string& tx) {
@@ -248,8 +268,7 @@ std::wstring UndoDirect(const Config& cfg, const std::vector<Op>& ops, size_t ap
             LogLine("undo conflict preserved: " + ops[i].path);
             continue;
         }
-        BOOL ok = !ops[i].backup.empty() ? CopyFileW(ops[i].backup.c_str(), target.c_str(), FALSE)
-                                         : (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND);
+        bool ok = !ops[i].backup.empty() ? CopyIntoPlace(ops[i].backup, target) : RemoveTarget(target);
         if (ok && (ops[i].backup.empty() || Sha256File(target) == ops[i].oldSha)) continue;
         LogLine("tx " + tx + ": UNDO FAILED for " + ops[i].path + ": " + Narrow(LastErrorText(GetLastError())) +
                 " (backup " + Narrow(ops[i].backup) + ")");
@@ -379,8 +398,7 @@ InstallOutcome ApplyTx(const Config& cfg, const std::string& tx, json& txj, std:
             }
             LogLine("tx " + tx + ": running " + o.path + " moved aside to " + Narrow(aside));
         }
-        BOOL ok = o.staged.empty() ? (DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND)
-                                   : MoveFileExW(o.staged.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH);
+        bool ok = o.staged.empty() ? RemoveTarget(target) : MoveIntoPlace(o.staged, target);
         if (!ok) {
             message = Tr(L"Nelze nahradit ", L"Cannot replace ") + Widen(o.path) + L": " + LastErrorText(GetLastError());
             LogLine("tx " + tx + ": " + Narrow(message));

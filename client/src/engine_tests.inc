@@ -1,5 +1,7 @@
 // Exercises private transaction recovery against an isolated directory and simulated boot identities.
+#include <memory>
 #include <thread>
+#include <sddl.h>
 #include "registry_tests.inc"
 #include "migration_tests.inc"
 #include "offline_tests.inc"
@@ -35,6 +37,54 @@ bool SelfTest(std::wstring& report) {
     Config cfg{L"file:///" + feed + L"\\", root};
     std::replace(cfg.feedUrl.begin(), cfg.feedUrl.end(), L'\\', L'/');
     auto put = [](const std::wstring& path, const std::string& text) { return WriteTextAtomic(path, text); };
+    {
+        // LiberNT system files: owned by TrustedInstaller, readable but not deletable by SYSTEM and administrators.
+        const wchar_t* protectedSddl = L"O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:SY"
+                                       L"D:P(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;FR;;;SY)(A;;FR;;;BA)";
+        const SECURITY_INFORMATION what = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+        auto sddl = [&](const std::wstring& path) {
+            std::vector<BYTE> sd(4096);
+            DWORD need = 0;
+            LPWSTR text = nullptr;
+            std::wstring result;
+            if (GetFileSecurityW(path.c_str(), what, sd.data(), (DWORD)sd.size(), &need) &&
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(sd.data(), SDDL_REVISION_1, what, &text, nullptr)) result = text;
+            if (text) LocalFree(text);
+            return result;
+        };
+        std::wstring error, target = JoinPath(base, L"protected\\system.dll"), fresh = target + L".lntu-new";
+        auto privileges = std::make_unique<RecoveryPrivileges>(error);
+        // Like System32\drivers, the folder grants modify but not FILE_DELETE_CHILD, which would bypass the file rules.
+        const wchar_t* folderSddl = L"D:P(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)"
+                                    L"(A;;0x1301bf;;;SY)(A;;0x1301bf;;;BA)";
+        PSECURITY_DESCRIPTOR sd = nullptr, folder = nullptr;
+        bool fixture = *privileges && put(target, "old") &&
+                       ConvertStringSecurityDescriptorToSecurityDescriptorW(protectedSddl, SDDL_REVISION_1, &sd, nullptr) &&
+                       ConvertStringSecurityDescriptorToSecurityDescriptorW(folderSddl, SDDL_REVISION_1, &folder, nullptr) &&
+                       SetFileSecurityW(target.c_str(), what, sd) &&
+                       SetFileSecurityW(JoinPath(base, L"protected").c_str(), DACL_SECURITY_INFORMATION, folder);
+        if (sd) LocalFree(sd);
+        if (folder) LocalFree(folder);
+        privileges.reset();  // the restore privilege opens files with backup intent and would hide the protection
+        std::wstring expected = fixture ? sddl(target) : L"";
+        if (fixture && DeleteFileW(target.c_str())) {
+            fixture = false;
+            error = L"this system lets the account delete the protected file " + expected;
+        }
+        if (fixture) {
+            put(fresh, "new");
+            bool replaced = NT_SUCCESS(LuupRenameFile(NtPath(fresh).c_str(), NtPath(target).c_str(), TRUE));
+            std::vector<uint8_t> bytes;
+            check(replaced && ReadFileBytes(target, bytes) && std::string(bytes.begin(), bytes.end()) == "new" &&
+                  !expected.empty() && sddl(target) == expected,
+                  L"a protected system file is replaced and keeps its TrustedInstaller owner and access rules");
+            check(!DeleteFileW(target.c_str()) && NT_SUCCESS(LuupDeleteFile(NtPath(target).c_str())) && !FileExists(target),
+                  L"a protected system file can be removed by an update");
+        } else {
+            if (error.empty()) error = LastErrorText(GetLastError());
+            report += L"SKIP protected system file fixture: " + error + L"\r\n";
+        }
+    }
     {
         UpdateLock owner(report);
         bool denied = false;
