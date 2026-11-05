@@ -38,8 +38,16 @@ Updates an installed [LiberNT](https://github.com/nks-hub/LiberNT) system to a n
 
 - Build machine: Python 3.12+ with PyNaCl, 7-Zip (`7z`) and a configured LiberNT build tree. It runs wherever LiberNT is built; Linux (Debian 13, `python3-nacl`, `p7zip-full`) is what `build-release.sh` and the systemd units assume.
 - Client build: Visual Studio 2022 or newer with the x64 C++ tools and the Windows SDK (`ntdll.lib` for `luupboot.exe`).
-- Target: LiberNT amd64.
-- Registry servicing also requires an SMSS build with `UpdateExecute` and a verified factory registry baseline.
+- Target: LiberNT amd64 built from the `nks` branch of [nks-hub/LiberNT](https://github.com/nks-hub/LiberNT) at `5fccfb5` or newer, and `195ec41` or newer when an update adds a boot driver. The commits:
+
+  | Change | Commit in `nks` | Branch for upstream |
+  |---|---|---|
+  | SMSS runs `UpdateExecute` after registry initialization (registry servicing) | `5fccfb5` | `nks-feat/smss-update-execute` |
+  | Every hive block of a dirty registry cell is flushed | `2f303f8` | `nks-fix/cmlib-dirty-cell-blocks` |
+  | Boot drivers start under their own service key (new boot drivers) | `195ec41` | `nks-fix/ntos-io-boot-driver-registry-path` |
+
+  Installations from older builds should be reinstalled; the [migration order](docs/OPERATIONS.md#enable-registry-servicing) covers an in-place upgrade.
+- Registry servicing also requires a verified factory registry baseline.
 - Update server: any static HTTP server; `server/docker/` has an nginx container.
 
 ## Installation
@@ -141,11 +149,9 @@ nginx serves `feed/` read-only with `no-cache` on `feed.json` and long caching f
 
 ## Limitations
 
-- Older SMSS builds support file updates only. Registry servicing needs an OS bootstrap update with `UpdateExecute`, the registry-capable client and a verified factory baseline; see [migration order](docs/OPERATIONS.md#enable-registry-servicing).
 - A boot-start driver that crashes before smss runs stops `luupboot.exe` too; the recovery entry starts the previous kernel and HAL but the new boot drivers. A new boot loader that does not start cannot be undone from inside the system. Both cases need [recovery from a separate LiberNT system](docs/OPERATIONS.md#recover-from-an-independent-system) with `/recover-offline`.
 - Offline recovery passed in a VM (OVMF) after an updated `disk.sys` and after a newly added boot driver crashed the kernel before smss, and on MBR and GPT disks after both EFI loader copies were overwritten. Physical UEFI hardware is not tested yet.
 - LiberNT builds ship unsigned EFI loaders, so firmware with Secure Boot enabled refuses to start them. With a test-signed `bootmgfw.efi` and `winload.efi`, updates, rollback and offline recovery of signed loaders passed with Secure Boot on; the OS build has to sign its loaders before Secure Boot can be used.
-- LiberNT kernels built before commit `25861e4` of the `nks` branch take a boot driver's service name from its file name, so there a boot-start driver starts only when its service key matches the file name (`foo` for `foo.sys`).
 - Automatic EFI detection requires one ESP, a FAT filesystem, the LiberNT loader and agreement with the firmware boot device. A conflicting Setup value is refused; an absent one is allowed. Multiple ESPs require an administrator-verified `bootRoot`. Loader update and rollback passed on OVMF with MBR and GPT disks; physical UEFI hardware still needs a runtime test.
 
 ## Testing
