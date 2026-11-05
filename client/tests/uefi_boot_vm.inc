@@ -41,9 +41,10 @@ static int UefiBootProbe(const std::wstring& mode) {
         bool lateAbsent = RegQueryValueExW(key, L"UpdateExecute", nullptr, nullptr, nullptr, &bytes) == ERROR_FILE_NOT_FOUND;
         bool commandsOk = ReadBootCommands(key, L"BootExecute", early, error) && ReadBootCommands(key, L"UpdateExecute", late, error);
         RegCloseKey(key);
-        if (!commandsOk || FileExists(L"C:\\Windows\\System32\\luupboot.exe")) return 1;
+        if (!commandsOk) return 1;
+        // A helper registered for another data folder stays installed after cleanup.
         saved = {{"early", early}, {"late", late}, {"lateAbsent", lateAbsent}, {"loaders", json::array()},
-                 {"helper", Sha256File(L"C:\\luupboot.exe")}};
+                 {"helper", Sha256File(L"C:\\luupboot.exe")}, {"helperKept", FileExists(L"C:\\Windows\\System32\\luupboot.exe")}};
         if (saved["helper"].get<std::string>().empty() || !WriteTextAtomic(dummy, "before") ||
             !SaveState(json{{"installed", "UefiBefore"}, {"pending", ""}})) return 1;
         CheckResult update;
@@ -113,7 +114,8 @@ static int UefiBootProbe(const std::wstring& mode) {
         if (ok && saved.value("lateAbsent", false)) ok = RegDeleteValueW(key, L"UpdateExecute") == ERROR_SUCCESS && RegFlushKey(key) == ERROR_SUCCESS;
         RegCloseKey(key);
         ok = ok && Sha256File(L"C:\\Windows\\System32\\luupboot.exe") == saved["helper"].get<std::string>();
-        if (ok) ok = DeleteFileW(L"C:\\Windows\\System32\\luupboot.exe") && DeleteFileW(dummy.c_str());
+        if (ok && !saved.value("helperKept", false)) ok = DeleteFileW(L"C:\\Windows\\System32\\luupboot.exe");
+        if (ok) ok = DeleteFileW(dummy.c_str());
     }
     std::cout << (ok ? "PASS " : "FAIL ") << Narrow(mode) << std::endl;
     return ok ? 0 : 1;

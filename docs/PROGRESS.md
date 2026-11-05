@@ -64,6 +64,10 @@ Stav k 5. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - Opravený klient ze samostatného systému vrátil obě kopie na původní SHA-256 `e7cb92765a55135b70f93b475f67d90d604e34980b31836f9c8574be8b60c8bc`. BCD měl před obnovou i po ní stejný hash; updater ho nemění. Cílový systém potom normálně nabootoval s prázdnou čekající transakcí.
 - Review po testu zachytilo tři další chyby: služba by po neúplné offline obnově každý den v nastavenou hodinu opakovaně restartovala, opakovaný `--list` mohl nabídnout starší instalaci a dvě odmítnutí neměla text chyby. Opravy mají vlastní regresní kontroly. Dokumentace nyní uvádí, že po zahájení offline obnovy se boot plány transakce už nespouštějí.
 - Výsledný klient prošel na LiberNT 125 kontrolami a 9 HTTP kontrolami bez chyby. SHA-256: `0192e9a2ff8aed23fcb9105bd4ce68925c079d4e0b3fabfb746b7cb967ce5388`. Skutečnou obnovu zavaděče provedl předchozí kandidát `cabe35dcc27e868e181d6c2c03e49a4b74103aa47bf1ca7ed0b35c563f9def51`; výběr transakce se od té doby změnil jen u starších instalací.
+- Čerstvá instalace LiberNT `5fccfb5` dává systémovým souborům vlastníka TrustedInstaller a SYSTEM i správcům jen čtení. Updater je proto nemohl nahradit; plán při startu skončil `STATUS_ACCESS_DENIED` a bezpečně se vrátil. Starší testovací instalace měla `Everyone:F`, proto se to dřív neprojevilo. `SeRestorePrivilege` v LiberNT právo DELETE nepřidělí. Updater nyní u odmítnutého souboru převezme vlastnictví, nahradí ho a novému souboru dá původního vlastníka i pravidla přístupu.
+- Pád aktualizovaného boot ovladače: transakce nahradila chráněný `disk.sys` testovacím ovladačem. Nativní helper ho při startu vyměnil se zachováním práv; další start skončil pádem `0xE2` ve `Phase1Initialization`, ještě před SMSS. Obnova z druhého systému vrátila původní `disk.sys` včetně vlastníka a pravidel přístupu a cílový systém normálně nabootoval.
+- Nově zaregistrovaný ovladač se Start=0 LiberNT při startu nespustí, ověřeno i neškodným ovladačem. Jde o chování OS; aktualizace existujícího boot ovladače se načte a byla otestována výše.
+- Finální klient prošel úplnou aktualizací a rollbackem obou EFI zavaděčů a souboru na NTFS přes čtyři skutečné restarty. Na obou testovacích instalacích prošlo 127 kontrol a 9 HTTP kontrol bez chyby. SHA-256 klienta `52d88bf4e33d9edc39910f32e3b4bc03f8cf8b61d6cbb6fa3a8e0dbde580b68c`, nativního helperu `998fce5795a529e3e828e54db6c904d3b671d9678a100463d3a59f45c97bc4f6`.
 - Testy proběhly ve VM s OVMF, diskem MBR a vypnutým Secure Boot. Fyzický UEFI počítač, GPT a Secure Boot ověřené nejsou. Testovací ovladač a poškozování zavaděče jsou jen v testovacím helperu, ne v běžném sestavení.
 
 ## Naměřený výkon registru
@@ -91,7 +95,7 @@ Kernel při každém startu zapisuje `FirmwareBootDevice` podle oddílu zavadě�
 
 - Soukromý testovací v2 feed (16 vydání) prošel ověřením podpisu i všech objektů. Plán první migrace registru z továrního základu `9d41077` na `5fccfb5` byl na starší instalaci spočítaný jen pro čtení: 11 nových klíčů a hodnot v SOFTWARE (ovladač OpenGL a náhrady písem), jedna místní změna zachovaná, nic k odstranění. Stejný výsledek dala úplná kontrola klientem se samostatnou datovou složkou: ověřený podpis v2 feedu, manifesty a oba objekty registru, potvrzená podpora `UpdateExecute` v SMSS. Plán zatím nebyl aplikován a v2 feed není veřejný.
 - Ověřit nezávislou obnovu na fyzickém počítači, s GPT a se Secure Boot; ve VM už prošla po pádu ovladače i po poškození zavaděče.
-- Ověřit pád ovladače, který se načte už zavaděčem; testovací ovladač se Start=0 se při startu nenačetl.
+- V LiberNT zjistit, proč se nově zaregistrovaný ovladač se Start=0 při startu nespustí.
 - Doplnit běhové ověření EFI na GPT a fyzickém počítači; automatické určení a skutečný boot po změně i návratu zavaděče na OVMF/MBR už prošly.
 
 Nová klientská verze ani nový registry feed zatím nejsou publikované. Tento přehled není potvrzením, že všech pět omezení už zmizelo.

@@ -152,6 +152,40 @@ static int OfflineVmProbe(const std::wstring& mode) {
                   << InstalledRelease() << " pending=" << PendingTransaction() << "\n";
         return ok ? 0 : 1;
     }
+    // LiberNT does not start a newly registered Start=0 driver, so this replaces disk.sys, which the loader always loads.
+    if (mode == L"offline-bootdriver-prepare") {
+        const std::wstring disk = L"C:\\Windows\\System32\\drivers\\disk.sys";
+        std::vector<uint8_t> bad;
+        if (!PendingTransaction().empty() || InstalledRelease() != "RecoveryBefore" ||
+            !ReadFileBytes(L"C:\\lntu_recovery_crash.sys", bad) || bad.size() < 512 || bad[0] != 'M' || bad[1] != 'Z') {
+            std::cout << "FAIL state or crash driver\n";
+            return 1;
+        }
+        std::string before = Sha256File(disk), hash = Sha256Hex(bad.data(), bad.size());
+        if (before.empty() || before == hash ||
+            !WriteFileAtomic(JoinPath(DataDir(), L"feed\\objects\\" + Widen(hash.substr(0, 2)) + L"\\" + Widen(hash)), bad.data(), bad.size()) ||
+            !SaveJson(JoinPath(DataDir(), L"victim.json"), json{{"diskBefore", before}, {"diskAfter", hash}})) return 1;
+        CheckResult update;
+        update.installed = "RecoveryBefore";
+        update.latest.id = "RecoveryBadBootDriver";
+        update.changes = {{"Windows/system32/drivers/disk.sys", hash, bad.size(), before}};
+        auto outcome = InstallUpdate(cfg, update, error, nullptr);
+        std::cout << (outcome == InstallOutcome::PendingRestart ? "PASS " : "FAIL ") << Narrow(error)
+                  << " tx=" << PendingTransaction() << " before=" << before << "\n";
+        return outcome == InstallOutcome::PendingRestart ? 0 : 1;
+    }
+    if (mode == L"offline-bootdriver-first" || mode == L"offline-bootdriver-recovered") {
+        bool first = mode == L"offline-bootdriver-first";
+        bool finalized = first ? FinalizePending(cfg, error) : true;
+        auto saved = LoadJson(JoinPath(DataDir(), L"victim.json"), json::object());
+        std::string have = Sha256File(L"C:\\Windows\\System32\\drivers\\disk.sys");
+        bool ok = finalized && !saved.empty() &&
+                  (first ? have == saved.value("diskAfter", "") && !PendingTransaction().empty() && FileExists(BootFile(L"trial"))
+                         : have == saved.value("diskBefore", "") && PendingTransaction().empty() && InstalledRelease() == "RecoveryBefore");
+        std::cout << (ok ? "PASS " : "FAIL ") << Narrow(mode) << " disk.sys=" << have << " installed=" << InstalledRelease()
+                  << " pending=" << PendingTransaction() << " " << Narrow(error) << "\n";
+        return ok ? 0 : 1;
+    }
     if (mode == L"offline-driver-prepare" || mode == L"offline-driver-retry") {
         if (!PendingTransaction().empty() || (!InstalledRelease().empty() && InstalledRelease() != "RecoveryBefore") ||
             FileExists(L"C:\\Windows\\System32\\drivers\\lntu_recovery_crash.sys")) return 1;
