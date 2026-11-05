@@ -89,7 +89,7 @@ Kernel při každém startu zapisuje `FirmwareBootDevice` podle oddílu zavadě�
 
 ## Zbývající práce
 
-- Soukromý testovací v2 feed (16 vydání) prošel ověřením podpisu i všech objektů. Plán první migrace registru z továrního základu `9d41077` na `5fccfb5` byl na starší instalaci spočítaný jen pro čtení: 11 nových klíčů a hodnot v SOFTWARE (ovladač OpenGL a náhrady písem), jedna místní změna zachovaná, nic k odstranění. Plán zatím nebyl aplikován a v2 feed není veřejný.
+- Soukromý testovací v2 feed (16 vydání) prošel ověřením podpisu i všech objektů. Plán první migrace registru z továrního základu `9d41077` na `5fccfb5` byl na starší instalaci spočítaný jen pro čtení: 11 nových klíčů a hodnot v SOFTWARE (ovladač OpenGL a náhrady písem), jedna místní změna zachovaná, nic k odstranění. Stejný výsledek dala úplná kontrola klientem se samostatnou datovou složkou: ověřený podpis v2 feedu, manifesty a oba objekty registru, potvrzená podpora `UpdateExecute` v SMSS. Plán zatím nebyl aplikován a v2 feed není veřejný.
 - Ověřit nezávislou obnovu na fyzickém počítači, s GPT a se Secure Boot; ve VM už prošla po pádu ovladače i po poškození zavaděče.
 - Ověřit pád ovladače, který se načte už zavaděčem; testovací ovladač se Start=0 se při startu nenačetl.
 - Doplnit běhové ověření EFI na GPT a fyzickém počítači; automatické určení a skutečný boot po změně i návratu zavaděče na OVMF/MBR už prošly.

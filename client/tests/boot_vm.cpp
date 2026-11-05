@@ -92,6 +92,24 @@ int wmain(int argc, wchar_t** argv) {
             std::cout << (change.after.present ? "SET " : "DEL ") << Narrow(RegistryDisplayName(change.after)) << "\n";
         return ok ? 0 : 1;
     }
+    if (mode == L"registry-check" && argc == 5) {
+        // Full signed check against a local feed copy with a new data folder; the system's updater data stays untouched.
+        std::wstring feedDir = argv[2];
+        g_dataOverride = feedDir + L"-data";
+        if (!CreateDirectoryW(g_dataOverride.c_str(), nullptr)) { std::cout << "FAIL data folder must not exist\n"; return 1; }
+        Config check{L"file:///" + feedDir + L"\\", L"C:\\"};
+        check.baseRelease = Narrow(argv[3]);
+        check.registryBaseRelease = Narrow(argv[4]);
+        CheckResult result;
+        bool ok = CheckForUpdate(check, result, error, nullptr);
+        std::cout << (ok ? "PASS" : "FAIL") << " latest=" << result.latest.id << " files=" << result.changes.size()
+                  << " registry=" << result.registryChanges.size() << " preserved=" << result.registryPreserved
+                  << " registryBefore=" << result.registryBefore << " registryAfter=" << result.registryAfter
+                  << " smssSupportsRegistry=" << RegistryUpdatesSupported() << " " << Narrow(error) << "\n";
+        for (const auto& change : result.registryChanges)
+            std::cout << (change.after.present ? "SET " : "DEL ") << Narrow(RegistryDisplayName(change.after)) << "\n";
+        return ok ? 0 : 1;
+    }
     if (mode.rfind(L"registry-", 0) == 0 || mode.rfind(L"smss-", 0) == 0) return RegistryBootProbe(mode, cfg);
     if (mode == L"selftest-client") {
         SECURITY_ATTRIBUTES attributes{sizeof attributes, nullptr, TRUE};
