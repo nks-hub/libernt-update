@@ -38,6 +38,12 @@ int wmain(int argc, wchar_t** argv) {
     g_dataOverride = ProbeBase() + L"\\data";
     Config cfg{L"file:///C:/lntu-review/feed/", ProbeBase() + L"\\root"};
     std::wstring error;
+    if (mode == L"selftest-engine") {
+        std::wstring report;
+        bool ok = SelfTest(report);
+        std::cout << Narrow(report);
+        return ok ? 0 : 1;
+    }
     if (mode == L"feed-http") return RunFeedHttpTest();
     if (mode == L"tray-test") return RunTrayTest();
     if (mode == L"tray-launch" && argc == 3) return LaunchTrayTest(wcstoul(argv[2], nullptr, 10));

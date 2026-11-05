@@ -96,6 +96,7 @@ std::wstring Usage() {
            L"LiberNTUpdate.exe /history        list past updates\r\n"
            L"LiberNTUpdate.exe /restart        restart the computer\r\n"
            L"LiberNTUpdate.exe /register       enable automatic updates (service and tray icon)\r\n"
+           L"LiberNTUpdate.exe /migrate-legacy --feed URL --base-release ID [--registry-base-release ID] [--boot-root PATH]\r\n"
            L"LiberNTUpdate.exe /status         result of the last automatic check\r\n"
            L"LiberNTUpdate.exe /tray           tray icon that announces updates (started at logon)\r\n"
            L"LiberNTUpdate.exe /selftest       built-in checks";
@@ -111,6 +112,31 @@ const wchar_t* OutcomeName(InstallOutcome r) {
 }
 
 int Cli(const std::wstring& cmd) {
+    if (cmd == L"/migrate-legacy") {
+        wchar_t windows[MAX_PATH]{};
+        if (!GetWindowsDirectoryW(windows, _countof(windows)) || windows[1] != L':') return 1;
+        Config trusted{L"", std::wstring(windows, 3)};
+        trusted.autoMode = "off";
+        trusted.restartHour = -1;
+        int argc = 0;
+        auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        bool valid = argc >= 6 && argc % 2 == 0;
+        for (int i = 2; valid && i + 1 < argc; i += 2) {
+            std::wstring option = argv[i];
+            if (option == L"--feed") trusted.feedUrl = argv[i + 1];
+            else if (option == L"--base-release") trusted.baseRelease = Narrow(argv[i + 1]);
+            else if (option == L"--registry-base-release") trusted.registryBaseRelease = Narrow(argv[i + 1]);
+            else if (option == L"--boot-root") trusted.bootRoot = argv[i + 1];
+            else valid = false;
+        }
+        LocalFree(argv);
+        if (!valid) { Out(Usage()); return 1; }
+        if (!trusted.feedUrl.empty() && trusted.feedUrl.back() != L'/') trusted.feedUrl += L'/';
+        std::wstring archive, error;
+        if (!MigrateLegacyData(trusted, archive, error)) { Out(L"ERROR " + error + (archive.empty() ? L"" : L"; archive: " + archive)); return 8; }
+        Out(L"Legacy data archived at " + archive + L". Install this client in Program Files and run /register. Automatic updates remain off.");
+        return 0;
+    }
     std::wstring securityError;
     if (SecureUpdateData(securityError)) DeleteFileW(JoinPath(DataDir(), L"cli-output.txt").c_str());
     Config cfg = LoadConfig();

@@ -28,6 +28,20 @@ journalctl -u luup-release.service -n 20 -o cat
 
 The fork merges upstream daily (`Sync upstream` workflow). To merge now: `gh workflow run "Sync upstream" -R nks-hub/LiberNT --ref nks`. A merge conflict opens an issue in the fork and fails the workflow.
 
+## Migrate legacy updater data
+
+Run the registry-capable client as an administrator. Set `FEED_URL` to the verified feed and `BASE_RELEASE` to a file baseline established from trusted installation records or its signed manifest:
+
+```bat
+start "" /wait LiberNTUpdate.exe /migrate-legacy --feed "%FEED_URL%" --base-release "%BASE_RELEASE%"
+```
+
+For a registry feed, also pass `--registry-base-release` with the release of the original factory hives. Use `--boot-root` only for a separately verified boot partition. The command checks the signed feed and manifests in a new protected directory before stopping and disabling the legacy updater services. It archives the old directory without adopting its plans, history or recorded release, then activates the protected state with `auto=off`.
+
+A prepared update is archived without being applied. An already applied, unconfirmed update must be finished or independently recovered first. The archive path is printed on success and retained on a failed rollback; an occupied destination is never replaced.
+
+Keep that archive until verification is complete. Install the tested binaries under Program Files, run `/register` and start `LiberNTUpdate`. Check the service, `/check` and a normal restart before enabling automatic installation. Keep `auto=off` while a candidate client is newer than the client in its selected feed.
+
 ## Enable registry servicing
 
 1. Publish and install an OS bootstrap build containing the `UpdateExecute` SMSS change through the existing file-only feed. Complete its restart verification before enabling registry updates.

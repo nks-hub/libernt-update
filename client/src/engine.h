@@ -121,3 +121,4 @@ bool RestartSystem(std::wstring& error);
 
 /// Built-in checks of the cryptography and of the transaction logic on a scratch directory.
 bool SelfTest(std::wstring& report);
+bool MigrateLegacyData(const Config& verifiedConfig, std::wstring& archive, std::wstring& error);

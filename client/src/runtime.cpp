@@ -71,7 +71,7 @@ std::wstring TargetPath(const Config& cfg, const std::string& relative) {
     return JoinPath(cfg.root, path.substr(prefix.size()));
 }
 
-static bool TrustedTree(const std::wstring& path, std::wstring& reason) {
+bool TrustedUpdateTree(const std::wstring& path, std::wstring& reason) {
     DWORD attrs = GetFileAttributesW(path.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) { reason = L"Unreadable or redirected update path: " + path; return false; }
     PSECURITY_DESCRIPTOR sd = nullptr;
@@ -104,10 +104,25 @@ static bool TrustedTree(const std::wstring& path, std::wstring& reason) {
     if (find == INVALID_HANDLE_VALUE) return GetLastError() == ERROR_FILE_NOT_FOUND;
     do {
         if (!wcscmp(item.cFileName, L".") || !wcscmp(item.cFileName, L"..")) continue;
-        if (!TrustedTree(JoinPath(path, item.cFileName), reason)) { trusted = false; break; }
+        if (!TrustedUpdateTree(JoinPath(path, item.cFileName), reason)) { trusted = false; break; }
     } while (FindNextFileW(find, &item));
     FindClose(find);
     return trusted;
+}
+
+static const wchar_t kUpdateDataSecurity[] = L"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)";
+
+bool CreateUpdateDataDirectory(const std::wstring& path, std::wstring& error) {
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kUpdateDataSecurity, SDDL_REVISION_1, &sd, nullptr)) {
+        error = L"Update data security: " + LastErrorText(GetLastError());
+        return false;
+    }
+    SECURITY_ATTRIBUTES attributes{sizeof attributes, sd, FALSE};
+    bool ok = CreateDirectoryW(path.c_str(), &attributes) != 0;
+    if (!ok) error = L"Cannot create a protected update directory: " + LastErrorText(GetLastError());
+    LocalFree(sd);
+    return ok;
 }
 
 bool SecureUpdateData(std::wstring& error) {
@@ -118,15 +133,9 @@ bool SecureUpdateData(std::wstring& error) {
     static std::wstring securedDirectory;
     if (securedDirectory == dir) return true;
     PSECURITY_DESCRIPTOR sd = nullptr;
-    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(L"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;BU)",
-                                                             SDDL_REVISION_1, &sd, nullptr)) return false;
-    SECURITY_ATTRIBUTES attrs{sizeof attrs, sd, FALSE};
-    if (GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES && !CreateDirectoryW(dir.c_str(), &attrs)) {
-        error = L"Update data: " + LastErrorText(GetLastError());
-        LocalFree(sd);
-        return false;
-    }
-    if (!TrustedTree(dir, error)) {
+    if (GetFileAttributesW(dir.c_str()) == INVALID_FILE_ATTRIBUTES && !CreateUpdateDataDirectory(dir, error)) return false;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(kUpdateDataSecurity, SDDL_REVISION_1, &sd, nullptr)) return false;
+    if (!TrustedUpdateTree(dir, error)) {
         error += L". Recovery files were not used.";
         LocalFree(sd);
         return false;

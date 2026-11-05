@@ -41,6 +41,11 @@ Stav k 5. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - HTTP testy prošly review a jsou součástí CI. SHA-256 testovaného helperu: `4bb1f43264385f27b599f07e88b1bb83077dc872305945f17094ac55cc1e7147`; výsledky dalších sestavení jsou v [CI](https://github.com/nks-hub/libernt-update/actions/workflows/ci.yml).
 - `1ff805e`: HTTP regrese a jejich napojení do CI jsou odeslané; [CI 41934672654](https://github.com/nks-hub/libernt-update/actions/runs/41934672654) prošlo včetně Windows běhu všech devíti HTTP kontrol.
 - Kanály vydání klienta: verze s příponou, například `v0.3.0-rc.1`, je GitHub prerelease a nenahradí stabilní latest. Běžný publisher odmítá draft i nevyžádanou předběžnou verzi; pro samostatný testovací feed lze zvolit přesný `CLIENT_TAG`. Devět Linux regresí publisher skriptu prošlo; nová verze tím není vydaná.
+- `9353df0`: kanály klienta jsou odeslané a [CI 41996328546](https://github.com/nks-hub/libernt-update/actions/runs/41996328546) prošlo.
+- Migrace staré datové složky prošla na LiberNT 106 kontrolami, včetně odmítnutí poškozeného feedu, ochrany rozpracované obnovy, zachování původních bajtů a návratu po neúspěšném přesunu. SHA-256 klienta: `c2909a570b2c045db1665255ada9f510cc74ab4704ef7fce0e58d5c82b5f75a0`.
+- Skutečná starší instalace prošla `/migrate-legacy`, instalací testovaného klienta, registrací služby, `/check` a normálním restartem. Služba běží se shodným SHA-256, nová složka prošla kontrolou oprávnění a `pending` je prázdný. Automatické instalace zůstávají vypnuté.
+- Starý připravený plán 1 194 souborů nebyl aplikován. Hash jádra po restartu zůstal `047e21f4200a0cf11ca1e0e363b1f3915377f43f27e76814df1fd06ce5d1422d`; archivované `state.json`, `history.json` a `boot/plan.txt` se bajtově shodují s původními soubory.
+- Závěrečná oprava z review odmítá také adresář místo příznaku obnovy a nepřístupný boot adresář; kontrola se opakuje po zastavení služby. Rozšířená sada na LiberNT prošla 108 kontrolami. SHA-256 klienta: `5cd0e7038013ad86d8d4d44be3eb10da46ccd9c19066b0372439a244fb32eb96`.
 
 ## Naměřený výkon registru
 
@@ -51,7 +56,7 @@ Při shodných podepsaných hashech se nyní tato práce neprovádí. Uvedená �
 ## Stav vydání
 
 - Registr i úprava ikony jsou implementované a otestované; změny zatím nejsou ve vydaném klientovi.
-- Před vydáním zbývá ověřit přechod konkrétní starší provozní instalace. Její datová složka umožňuje zápis běžným uživatelům, a nový klient proto odmítá převzít její plány obnovy. Pouhá změna oprávnění by nedoložila důvěryhodnost starých plánů.
+- Testovaný klient je nyní nainstalovaný na VM. Stará složka umožňovala zápis běžným uživatelům; je archivovaná a její plány se nepoužívají. Nová složka má chráněná oprávnění a vychází z ověřeného feedu. Veřejné vydání klienta ani zapnutí v2 feedu tím neproběhlo.
 
 ## Důležité zjištění z testů
 
@@ -63,7 +68,7 @@ Kernel při každém startu zapisuje `FirmwareBootDevice` podle oddílu zavadě�
 
 ## Zbývající práce
 
-- Ověřit přechod ze staršího klienta: důvěryhodnost datové složky, původní tovární stav registru a pořadí aktualizace SMSS a klienta.
+- Ověřit původní tovární základ registru konkrétní starší instalace při jejím prvním přechodu na v2 feed; migrace datové složky už je ověřená.
 - Dořešit obnovu ovladačů, které spadnou dříve, než se updater spustí; samotná záloha jádra a HAL nestačí.
 - Dořešit nezávislou návratovou cestu při selhání nového zavaděče; kód ve spuštěném systému takové selhání sám neopraví.
 - Nezávislou obnovu řešit i pro fyzický počítač; samotný návrat snapshotu na hypervizoru tento cíl nesplní.

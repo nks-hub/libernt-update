@@ -113,6 +113,8 @@ Inside LiberNT, `LiberNTUpdate.exe` without arguments opens the window. The comm
 
 The program is a GUI-subsystem executable, so command-line output also goes to `%ProgramData%\LiberNTUpdate\cli-output.txt`; from `cmd.exe` run it with `start "" /wait LiberNTUpdate.exe /check`.
 
+Older installations with user-writable updater data require `/migrate-legacy` before this client can use the data folder. The [migration procedure](docs/OPERATIONS.md#migrate-legacy-updater-data) preserves an archive and starts with automatic installation off.
+
 When an update icon is present, right-click it and choose **Pin this icon** to keep it outside the overflow. The choice applies only to this icon and can be changed later in the same menu or by dragging it. Announcements use the system notification center.
 
 ## Releases

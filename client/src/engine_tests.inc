@@ -1,6 +1,7 @@
 // Exercises private transaction recovery against an isolated directory and simulated boot identities.
 #include <thread>
 #include "registry_tests.inc"
+#include "migration_tests.inc"
 bool SelfTest(std::wstring& report) {
     g_testBootId = "test-boot-0";
     bool ok = true;
@@ -28,6 +29,7 @@ bool SelfTest(std::wstring& report) {
     std::wstring root = JoinPath(base, L"root"), feed = JoinPath(base, L"feed");
     g_dataOverride = JoinPath(base, L"data");
     ok = RegistrySelfTest(base, report) && ok;
+    ok = MigrationSelfTest(base, report) && ok;
     Config cfg{L"file:///" + feed + L"\\", root};
     std::replace(cfg.feedUrl.begin(), cfg.feedUrl.end(), L'\\', L'/');
     auto put = [](const std::wstring& path, const std::string& text) { return WriteTextAtomic(path, text); };

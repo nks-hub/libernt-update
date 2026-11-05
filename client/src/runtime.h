@@ -18,3 +18,5 @@ std::wstring TargetPath(const Config& cfg, const std::string& relative);
 std::string CurrentBootId();
 bool IsTestData();
 bool SecureUpdateData(std::wstring& error);
+bool CreateUpdateDataDirectory(const std::wstring& path, std::wstring& error);
+bool TrustedUpdateTree(const std::wstring& path, std::wstring& error);

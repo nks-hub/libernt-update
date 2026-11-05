@@ -30,6 +30,7 @@ bool g_selfUpdateStarted = false;
 namespace {
 
 std::wstring g_dataOverride;  // set by SelfTest to keep its state away from the real one
+std::wstring g_migrationData;
 std::string g_testBootId;
 std::string BootIdentity() { return g_testBootId.empty() ? CurrentBootId() : g_testBootId; }
 
@@ -617,6 +618,7 @@ InstallOutcome RevertTx(const Config& cfg, const std::string& of, const std::str
 bool IsTestData() { return !g_dataOverride.empty(); }
 
 std::wstring DataDir() {
+    if (!g_migrationData.empty()) return g_migrationData;
     if (!g_dataOverride.empty()) return g_dataOverride;
     wchar_t path[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, path))) return JoinPath(path, L"LiberNTUpdate");
@@ -927,4 +929,5 @@ bool RestartSystem(std::wstring& error) {
     return false;
 }
 
+#include "migration.inc"
 #include "engine_tests.inc"
