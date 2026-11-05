@@ -191,6 +191,32 @@ static int OfflineVmProbe(const std::wstring& mode) {
                   << InstalledRelease() << " pending=" << PendingTransaction() << "\n";
         return ok ? 0 : 1;
     }
+    // Installs the files listed in C:\lntu-files.json ({"release", "files": [{"path", "file"}]}) as one update.
+    if (mode == L"offline-files-install" || mode == L"offline-files-rollback") {
+        InstallOutcome outcome;
+        if (mode == L"offline-files-rollback") {
+            outcome = RollbackLast(cfg, error, nullptr);
+        } else {
+            auto plan = LoadJson(L"C:\\lntu-files.json", json::object());
+            CheckResult update;
+            update.installed = InstalledRelease();
+            update.latest.id = plan.value("release", "");
+            for (const auto& item : plan.value("files", json::array())) {
+                std::vector<uint8_t> data;
+                std::string path = item.value("path", "");
+                if (!ReadFileBytes(Widen(item.value("file", "")), data)) return 1;
+                std::string hash = Sha256Hex(data.data(), data.size());
+                if (!WriteFileAtomic(JoinPath(DataDir(), L"feed\\objects\\" + Widen(hash.substr(0, 2)) + L"\\" + Widen(hash)), data.data(), data.size()))
+                    return 1;
+                update.changes.push_back({path, hash, data.size(), Sha256File(TargetPath(cfg, path))});
+            }
+            if (update.latest.id.empty() || update.changes.empty() || !PendingTransaction().empty()) return 1;
+            outcome = InstallUpdate(cfg, update, error, nullptr);
+        }
+        std::cout << (outcome == InstallOutcome::Failed ? "FAIL " : "PASS ") << Narrow(error) << " installed=" << InstalledRelease()
+                  << " pending=" << PendingTransaction() << "\n";
+        return outcome == InstallOutcome::Failed ? 1 : 0;
+    }
     // A protected, loaded but non-critical driver: the native helper replaces and restores it across real restarts.
     if (mode.rfind(L"offline-protected-", 0) == 0) {
         const std::wstring beep = L"C:\\Windows\\System32\\drivers\\beep.sys";
@@ -300,7 +326,8 @@ static int OfflineVmProbe(const std::wstring& mode) {
         if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\Select", L"Current", RRF_RT_REG_DWORD, nullptr, &selected, &bytes) != ERROR_SUCCESS ||
             !selected || selected > 999) return 1;
         wchar_t service[160];
-        swprintf(service, 160, L"\\Registry\\Machine\\SYSTEM\\ControlSet%03lu\\Services\\LiberNTUpdateRecoveryProbe", selected);
+        // The LiberNT kernel derives a boot driver's service name from its image file name.
+        swprintf(service, 160, L"\\Registry\\Machine\\SYSTEM\\ControlSet%03lu\\Services\\lntu_recovery_crash", selected);
         RegistryItem missing{service, L"", true, false};
         auto present = missing;
         present.present = true;
