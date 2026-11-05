@@ -93,7 +93,7 @@ Everything is in `%ProgramData%\LiberNTUpdate\update.log`.
 
 When a system does not start after an update, choose **LiberNT (undo the last update)** in the boot menu; it starts the previous kernel and HAL and restores the previous files. A system that boots far enough for smss rolls back by itself on the third unconfirmed boot. Recovery remains available after the first replacement boot; confirmation requires another kernel boot. Restarting the service does not cancel a prepared update.
 
-Before updating an installation without a recorded release, set `baseRelease` to its verified release ID. Do not use the previous feed release as a guess. If Setup cannot identify the EFI partition, configure its verified mount path as `bootRoot`; an ambiguous volume is refused.
+Before updating an installation without a recorded release, set `baseRelease` to its verified release ID. Do not use the previous feed release as a guess. Automatic UEFI mapping checks the current firmware boot device, the partition table, FAT filesystem and LiberNT loader. It accepts a missing Setup value but refuses a conflicting one, the OS partition and multiple ESPs, including clones. For an unsupported or ambiguous layout, an administrator must verify and configure `bootRoot` explicitly.
 
 `build-release.sh` rejects a dirty source checkout and rechecks the cached client's `SHA256SUMS` on every run. It verifies the whole feed before each push, including the `already published` case. Signing keys are created exclusively with mode `0600` before their contents are written.
 

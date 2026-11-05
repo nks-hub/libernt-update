@@ -31,6 +31,8 @@ static void PutObject(const Config& cfg, const std::string& text) {
 #include "registry_boot.inc"
 #include "tray_vm.inc"
 #include "feed_http_vm.inc"
+#include "boot_volume_vm.inc"
+#include "uefi_boot_vm.inc"
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 2) return 2;
@@ -45,6 +47,10 @@ int wmain(int argc, wchar_t** argv) {
         return ok ? 0 : 1;
     }
     if (mode == L"feed-http") return RunFeedHttpTest();
+    if (mode == L"boot-volume") return BootVolumeProbe();
+    if (mode == L"boot-volume-clone") return BootVolumeProbe(true);
+    if (mode == L"boot-volume-test") return BootVolumeRegression();
+    if (mode.rfind(L"uefi-", 0) == 0) return UefiBootProbe(mode);
     if (mode == L"tray-test") return RunTrayTest();
     if (mode == L"tray-launch" && argc == 3) return LaunchTrayTest(wcstoul(argv[2], nullptr, 10));
     if (mode == L"registry-snapshot" && argc == 3) {

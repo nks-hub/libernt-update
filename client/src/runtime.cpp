@@ -2,9 +2,13 @@
 #include <winternl.h>
 #include <sddl.h>
 #include <aclapi.h>
+#include <winioctl.h>
 #include <algorithm>
+#include <vector>
 #include "sha256.h"
 #include "util.h"
+
+#include "boot_volume.inc"
 
 UpdateLock::UpdateLock(std::wstring& error, DWORD timeout) {
     std::string name = Narrow(DataDir());
@@ -43,32 +47,14 @@ std::wstring TargetPath(const Config& cfg, const std::string& relative) {
     if (!cfg.bootRoot.empty()) return JoinPath(cfg.bootRoot, path.substr(prefix.size()));
     if (IsTestData()) return JoinPath(cfg.root, path.substr(prefix.size()));
 
-    wchar_t partition[512]{};
-    DWORD bytes = sizeof partition;
-    RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\Setup", L"SystemPartition", RRF_RT_REG_SZ, nullptr, partition, &bytes);
-    wchar_t volume[MAX_PATH];
-    HANDLE find = FindFirstVolumeW(volume, MAX_PATH);
-    bool haveEfi = false;
-    std::wstring chosen;
-    if (find != INVALID_HANDLE_VALUE) {
-        do {
-            if (!FileExists(std::wstring(volume) + L"EFI\\LiberNT\\Boot\\bootmgfw.efi")) continue;
-            haveEfi = true;
-            std::wstring deviceName = volume + 4;
-            if (!deviceName.empty() && deviceName.back() == L'\\') deviceName.pop_back();
-            wchar_t device[512]{};
-            if (*partition && QueryDosDeviceW(deviceName.c_str(), device, 512) && _wcsicmp(device, partition) == 0)
-                chosen = volume;
-        } while (FindNextVolumeW(find, volume, MAX_PATH));
-        FindVolumeClose(find);
-    }
-    if (!chosen.empty()) return JoinPath(chosen, path.substr(prefix.size()));
-    // A removable clone can contain the same loader. Require an explicit partition when Setup cannot identify it.
     using FirmwareQuery = BOOL(WINAPI*)(DWORD*);
     auto queryFirmware = (FirmwareQuery)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetFirmwareType");
     DWORD firmware = 0;
-    if (haveEfi || (queryFirmware && queryFirmware(&firmware) && firmware == 2)) return {};
-    return JoinPath(cfg.root, path.substr(prefix.size()));
+    if (!queryFirmware || !queryFirmware(&firmware)) return {};
+    if (firmware == 1) return JoinPath(cfg.root, path.substr(prefix.size()));
+    if (firmware != 2) return {};
+    auto volume = DetectEfiPartition(cfg);
+    return volume.empty() ? std::wstring() : JoinPath(volume, path.substr(prefix.size()));
 }
 
 bool TrustedUpdateTree(const std::wstring& path, std::wstring& reason) {

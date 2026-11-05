@@ -75,7 +75,7 @@ start "" /wait "C:\Program Files\LiberNT Update\LiberNTUpdate.exe" /register
 |---|---|
 | `feedUrl` | feed address; overrides the one compiled in |
 | `baseRelease` | verified installed release ID, required for the first update when `state.json` does not record it; the client refuses to guess |
-| `bootRoot` | explicit boot partition path when Setup cannot identify the EFI partition; check and install use the same mapping, including offline feeds |
+| `bootRoot` | administrator-selected boot partition path when automatic EFI identification refuses an ambiguous or unsupported disk layout; check and install use the same mapping, including offline feeds |
 | `registryBaseRelease` | original factory hive release for an older installation whose registry baseline was not recorded; this is separate from later file updates |
 | `auto` | `install` checks and installs, `notify` only checks (the tray icon announces it), `off` |
 | `checkMinutes` | interval of the automatic check |
@@ -144,7 +144,7 @@ nginx serves `feed/` read-only with `no-cache` on `feed.json` and long caching f
 - Older SMSS builds support file updates only. Registry servicing needs an OS bootstrap update with `UpdateExecute`, the registry-capable client and a verified factory baseline; see [migration order](docs/OPERATIONS.md#enable-registry-servicing).
 - A boot-start driver that crashes before smss runs stops `luupboot.exe` too; the recovery entry starts the previous kernel and HAL but the new boot drivers. Take a VM snapshot before trying risky builds.
 - A new boot loader that does not start cannot be undone from inside the system; its backup stays in the transaction folder.
-- The boot partition must be identified by Setup or configured explicitly with `bootRoot`. Booting a UEFI machine after a loader update still requires platform testing.
+- Automatic EFI detection requires one ESP, a FAT filesystem, the LiberNT loader and agreement with the firmware boot device. A conflicting Setup value is refused; an absent one is allowed. Multiple ESPs require an administrator-verified `bootRoot`. Loader update and rollback passed on OVMF with an MBR disk and Secure Boot disabled; GPT and physical UEFI hardware still need runtime tests.
 
 ## Testing
 
