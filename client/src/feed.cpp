@@ -98,6 +98,8 @@ std::string Lower(std::string value) {
     return value;
 }
 
+} // namespace
+
 bool SafeManifestPath(const std::string& path) {
     if (path.empty() || path.front() == '/' || path.find('\\') != std::string::npos || path.find(':') != std::string::npos) return false;
     for (unsigned char c : path)
@@ -113,6 +115,7 @@ bool SafeManifestPath(const std::string& path) {
     return true;
 }
 
+namespace {
 #include "feed_registry.inc"
 
 }  // namespace

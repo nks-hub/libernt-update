@@ -3,7 +3,7 @@ static bool CommitOutcome(const Config& cfg, const std::string& tx, json& txj, c
                           const std::string& result, const std::string& installed, const std::wstring& text, std::wstring& message,
                           bool registryApplied = false) {
     json marker{{"tx", tx}, {"result", result}, {"installed", installed}, {"message", Narrow(text)}, {"registryApplied", registryApplied}};
-    std::wstring archive = JoinPath(TxDir(tx), L"boot.done");
+    std::wstring archive = JoinPath(TxDir(tx), g_offlineRecovery ? L"boot.offline.done" : L"boot.done");
     bool retired = GetFileAttributesW(archive.c_str()) != INVALID_FILE_ATTRIBUTES;
     // Boot must stop using the plans before pending can be cleared, even if the service is killed here.
     if (!retired && !SaveJson(BootFile(L"committed"), marker)) { message = L"Cannot commit the boot result; recovery was retained."; return false; }
@@ -21,11 +21,20 @@ static bool CommitOutcome(const Config& cfg, const std::string& tx, json& txj, c
     }
     if (!SaveState(state)) { message = L"Cannot save the recovery result; the terminal journal was retained."; return false; }
     message = text;
-    FinishHistory(hist, result, message);
-    RemoveRecoveryEntry(cfg);
-    if (result == "installed" || result == "cancelled") RemoveSelfUpdateGuard(tx);
-    if (result == "installed") PruneTransactions(5, tx);
+    if (!FinishHistory(hist, result, message)) {
+        message = L"The result was saved, but history.json could not be updated.";
+        return false;
+    }
+    if (!g_offlineRecovery) RemoveRecoveryEntry(cfg);
+    if (!g_offlineRecovery && (result == "installed" || result == "cancelled")) RemoveSelfUpdateGuard(tx);
+    if (!g_offlineRecovery && result == "installed") PruneTransactions(5, tx);
     return true;
+}
+
+/// True while an offline recovery of the pending transaction is incomplete; restarting cannot finish it.
+static bool OfflineRecoveryIncomplete() {
+    json committed = LoadJson(BootFile(L"committed"), json::object());
+    return committed.value("result", "") == "offline-recovery" && committed.value("tx", "") == PendingTransaction();
 }
 
 bool FinalizePending(const Config& cfg, std::wstring& message) {
@@ -44,6 +53,10 @@ bool FinalizePending(const Config& cfg, std::wstring& message) {
     };
     json committed = LoadJson(BootFile(L"committed"), json::object());
     if (committed.value("tx", "") == tx) {
+        if (committed.value("result", "") == "offline-recovery") {
+            message = L"Offline recovery is incomplete. Boot the independent recovery system and repeat it.";
+            return true;
+        }
         finish(committed.value("result", "failed"), committed.value("installed", ""), Widen(committed.value("message", "")), committed.value("registryApplied", false));
         return true;
     }
@@ -138,6 +151,10 @@ bool CancelPending(std::wstring& message) {
     if (!operation || !SecureUpdateData(message)) return false;
     std::string tx = PendingTransaction();
     if (tx.empty()) { message = Tr(L"Žádná aktualizace nečeká na restart.", L"No update waits for a restart."); return false; }
+    if (LoadJson(BootFile(L"committed"), json::object()).value("result", "") == "offline-recovery") {
+        message = L"Offline recovery must be completed from the independent recovery system.";
+        return false;
+    }
     json txj = LoadJson(JoinPath(TxDir(tx), L"tx.json"), json::object());
     if (txj.value("mode", "") != "restart" || FileExists(BootFile(L"applying")) || FileExists(BootFile(L"plan.done")) ||
         FileExists(BootFile(L"trial")) || !FileExists(BootFile(L"plan.txt"))) {

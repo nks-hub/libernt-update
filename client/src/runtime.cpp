@@ -10,6 +10,39 @@
 
 #include "boot_volume.inc"
 
+bool ReadVolumeIdentity(const std::wstring& path, VolumeIdentity& identity) {
+    wchar_t mount[MAX_PATH]{}, volume[MAX_PATH]{};
+    if (!GetVolumePathNameW(path.c_str(), mount, MAX_PATH) || !GetVolumeNameForVolumeMountPointW(mount, volume, MAX_PATH)) return false;
+    std::wstring raw(volume);
+    raw.pop_back();
+    STORAGE_DEVICE_NUMBER number{};
+    if (!DiskNumber(raw, number) || !number.PartitionNumber || number.PartitionNumber == MAXDWORD) return false;
+    identity = {volume, number.DeviceNumber, number.PartitionNumber};
+    return true;
+}
+
+bool RecoveryBootVolume(const std::wstring& path, std::wstring& root) {
+    VolumeIdentity volume;
+    if (!ReadVolumeIdentity(path, volume)) return false;
+    STORAGE_DEVICE_NUMBER runningBoot{};
+    auto device = FirmwareBootDevice();
+    if (device.empty() || !DiskNumber(L"\\\\?\\GLOBALROOT" + device, runningBoot) ||
+        (volume.disk == runningBoot.DeviceNumber && volume.partition == runningBoot.PartitionNumber)) return false;
+    std::wstring raw = volume.root;
+    raw.pop_back();
+    HANDLE file = CreateFileW(raw.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    PARTITION_INFORMATION_EX part{};
+    DWORD bytes = 0;
+    bool valid = file != INVALID_HANDLE_VALUE && DeviceIoControl(file, IOCTL_DISK_GET_PARTITION_INFO_EX,
+        nullptr, 0, &part, sizeof part, &bytes, nullptr) && bytes >= sizeof part && EfiPartition(part);
+    if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+    wchar_t fs[32]{};
+    if (!valid || !GetVolumeInformationW(volume.root.c_str(), nullptr, 0, nullptr, nullptr, nullptr, fs, 32) ||
+        (_wcsicmp(fs, L"FAT") && _wcsicmp(fs, L"FAT32"))) return false;
+    root = volume.root;
+    return true;
+}
+
 UpdateLock::UpdateLock(std::wstring& error, DWORD timeout) {
     std::string name = Narrow(DataDir());
     std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) { return (char)tolower(c); });

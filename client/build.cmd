@@ -18,6 +18,7 @@ set FEEDDEF=
 if defined LNTU_FEED_URL set FEEDDEF=/DLNTU_FEED_URL=L\"%LNTU_FEED_URL%\"
 set VERDEF=
 if defined LNTU_VERSION set VERDEF=/DLNTU_VERSION=\"%LNTU_VERSION%\"
+rem LUUP_REGISTRY_TESTING lets the running client apply registry plans without the boot-time UpdateExecute marker; offline recovery needs it.
 rc /nologo /fo out\app.res res\app.rc || exit /b 1
 cl /nologo /std:c++17 /O2 /EHsc /W3 /MT /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /DLUUP_REGISTRY_TESTING %FEEDDEF% %VERDEF% /Fo:out\ ^
    src\main.cpp src\gui.cpp src\tray_settings.cpp src\engine.cpp src\feed.cpp src\runtime.cpp src\registry.cpp src\registry_snapshot.cpp src\http.cpp src\util.cpp src\sha256.cpp boot\bootplan.c boot\regplan.c ^

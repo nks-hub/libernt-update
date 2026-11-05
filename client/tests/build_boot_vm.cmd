@@ -11,4 +11,8 @@ cl /nologo /std:c++17 /O2 /EHsc /W3 /MT /utf-8 /DUNICODE /D_UNICODE /DNOMINMAX /
    /Fe:out\boot_vm.exe /link out\vm.res wininet.lib ws2_32.lib comctl32.lib shell32.lib advapi32.lib user32.lib gdi32.lib ntdll.lib
 if errorlevel 1 exit /b %errorlevel%
 cl /nologo /std:c++17 /O2 /EHsc /W3 /MT /utf-8 /DUNICODE /D_UNICODE /Fo:out\ tests\service_vm.cpp /Fe:out\service_vm.exe /link advapi32.lib
+if errorlevel 1 exit /b %errorlevel%
+lib /nologo /def:tests\crash_driver.def /machine:x64 /out:out\crash_ntoskrnl.lib || exit /b 1
+cl /nologo /O1 /GS- /W3 /Fo:out\crash_driver.obj /c tests\crash_driver.c || exit /b 1
+link /nologo /NODEFAULTLIB /SUBSYSTEM:NATIVE /DRIVER /ENTRY:DriverEntry /MACHINE:X64 /OUT:out\lntu_recovery_crash.sys out\crash_driver.obj out\crash_ntoskrnl.lib
 exit /b %errorlevel%

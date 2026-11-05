@@ -31,6 +31,7 @@ namespace {
 
 std::wstring g_dataOverride;  // set by SelfTest to keep its state away from the real one
 std::wstring g_migrationData;
+bool g_offlineRecovery = false;
 std::string g_testBootId;
 std::string BootIdentity() { return g_testBootId.empty() ? CurrentBootId() : g_testBootId; }
 
@@ -96,7 +97,7 @@ bool SaveJson(const std::wstring& path, const json& j) { return WriteTextAtomic(
 json LoadState() { return LoadJson(JoinPath(DataDir(), L"state.json"), json{{"installed", ""}, {"pending", ""}}); }
 bool SaveState(const json& s) { return SaveJson(JoinPath(DataDir(), L"state.json"), s); }
 
-void AddHistory(const json& entry) {
+bool AddHistory(const json& entry) {
     std::wstring path = JoinPath(DataDir(), L"history.json");
     json h = LoadJson(path, json::array());
     if (!h.is_array()) h = json::array();
@@ -104,7 +105,11 @@ void AddHistory(const json& entry) {
     for (auto& e : h)
         if (e.value("tx", "") == entry.value("tx", "")) { e = entry; replaced = true; }
     if (!replaced) h.push_back(entry);
-    if (!SaveJson(path, h)) LogLine("cannot save history.json: " + Narrow(LastErrorText(GetLastError())));
+    if (!SaveJson(path, h)) {
+        LogLine("cannot save history.json: " + Narrow(LastErrorText(GetLastError())));
+        return false;
+    }
+    return true;
 }
 
 json HistoryFor(const std::string& tx) {
@@ -159,8 +164,7 @@ void RemoveRecoveryEntry(const Config& cfg) {
     WritePrivateProfileStringW(L"Operating Systems", kRecoverySection, nullptr, ini.c_str());
     WritePrivateProfileStringW(kRecoverySection, nullptr, nullptr, ini.c_str());
     SetFileAttributesW(ini.c_str(), attrs);
-    wchar_t sys[MAX_PATH];
-    GetSystemDirectoryW(sys, MAX_PATH);
+    std::wstring sys = JoinPath(cfg.root, L"Windows\\System32");
     DeleteFileW(JoinPath(sys, L"lntuprev.exe").c_str());
     DeleteFileW(JoinPath(sys, L"lntuphal.dll").c_str());
 }
@@ -439,12 +443,13 @@ json NewHistory(const std::string& tx, const std::string& kind, const std::strin
                 {"result", "running"}, {"files", files}, {"message", ""}};
 }
 
-void FinishHistory(json h, const std::string& result, const std::wstring& message) {
+bool FinishHistory(json h, const std::string& result, const std::wstring& message) {
     h["finished"] = NowIso();
     h["result"] = result;
     h["message"] = Narrow(message);
-    AddHistory(h);
+    bool saved = AddHistory(h);
     LogLine("tx " + h.value("tx", "") + " " + h.value("kind", "") + " " + result + ": " + Narrow(message));
+    return saved;
 }
 
 /// Runs a prepared transaction to its end and records the outcome in state and history.
@@ -884,7 +889,7 @@ void RunAutomatic(void* stopEvent) {
                 return;
             }
         }
-        if (!PendingTransaction().empty() && cfg.restartHour >= 0) {
+        if (!PendingTransaction().empty() && cfg.restartHour >= 0 && !OfflineRecoveryIncomplete()) {
             SYSTEMTIME t;
             GetLocalTime(&t);
             std::wstring err;
@@ -930,4 +935,7 @@ bool RestartSystem(std::wstring& error) {
 }
 
 #include "migration.inc"
+#include "offline_paths.inc"
+#include "offline_registry.inc"
+#include "offline_recovery.inc"
 #include "engine_tests.inc"

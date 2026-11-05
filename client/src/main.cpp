@@ -22,7 +22,7 @@ std::string g_guardTx;
 
 /// Writes to the console or pipe the program was started from, and to %ProgramData%\LiberNTUpdate\cli-output.txt
 /// (a GUI-subsystem program started by cmd.exe gets no pipe, so the file is what scripts read).
-void Out(const std::wstring& text) {
+void Out(const std::wstring& text, bool persist = true) {
     static bool attached = []() {
         HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
         DWORD type = output && output != INVALID_HANDLE_VALUE ? GetFileType(output) : FILE_TYPE_UNKNOWN;
@@ -34,6 +34,7 @@ void Out(const std::wstring& text) {
     DWORD wrote;
     HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
     if (h && h != INVALID_HANDLE_VALUE) WriteFile(h, s.data(), (DWORD)s.size(), &wrote, nullptr);
+    if (!persist) return;
     std::wstring securityError;
     if (!SecureUpdateData(securityError)) return;
     std::wstring path = JoinPath(DataDir(), L"cli-output.txt");
@@ -97,6 +98,8 @@ std::wstring Usage() {
            L"LiberNTUpdate.exe /restart        restart the computer\r\n"
            L"LiberNTUpdate.exe /register       enable automatic updates (service and tray icon)\r\n"
            L"LiberNTUpdate.exe /migrate-legacy --feed URL --base-release ID [--registry-base-release ID] [--boot-root PATH]\r\n"
+           L"LiberNTUpdate.exe /recover-offline --root VOLUME --list\r\n"
+           L"LiberNTUpdate.exe /recover-offline --root VOLUME --tx ID [--boot-root VOLUME] [--data-relative PATH]\r\n"
            L"LiberNTUpdate.exe /status         result of the last automatic check\r\n"
            L"LiberNTUpdate.exe /tray           tray icon that announces updates (started at logon)\r\n"
            L"LiberNTUpdate.exe /selftest       built-in checks";
@@ -112,6 +115,28 @@ const wchar_t* OutcomeName(InstallOutcome r) {
 }
 
 int Cli(const std::wstring& cmd) {
+    if (cmd == L"/recover-offline") {
+        int argc = 0;
+        auto argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        OfflineRecovery recovery;
+        bool valid = argv != nullptr, dataSet = false;
+        for (int i = 2; valid && i < argc; i++) {
+            std::wstring option = argv[i];
+            if (option == L"--list" && !recovery.listOnly) recovery.listOnly = true;
+            else if (i + 1 >= argc) valid = false;
+            else if (option == L"--root" && recovery.target.root.empty()) recovery.target.root = argv[++i];
+            else if (option == L"--boot-root" && recovery.target.bootRoot.empty()) recovery.target.bootRoot = argv[++i];
+            else if (option == L"--tx" && recovery.transaction.empty()) recovery.transaction = Narrow(argv[++i]);
+            else if (option == L"--data-relative" && !dataSet) { recovery.dataRelative = Narrow(argv[++i]); dataSet = true; }
+            else valid = false;
+        }
+        LocalFree(argv);
+        if (!valid || recovery.target.root.empty() || recovery.listOnly == !recovery.transaction.empty()) { Out(Usage(), false); return 1; }
+        std::wstring report;
+        bool ok = RecoverOffline(recovery, report);
+        Out((ok ? L"" : L"ERROR ") + report, false);
+        return ok ? 0 : 9;
+    }
     if (cmd == L"/migrate-legacy") {
         wchar_t windows[MAX_PATH]{};
         if (!GetWindowsDirectoryW(windows, _countof(windows)) || windows[1] != L':') return 1;

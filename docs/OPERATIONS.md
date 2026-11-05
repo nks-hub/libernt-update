@@ -42,6 +42,26 @@ A prepared update is archived without being applied. An already applied, unconfi
 
 Keep that archive until verification is complete. Install the tested binaries under Program Files, run `/register` and start `LiberNTUpdate`. Check the service, `/check` and a normal restart before enabling automatic installation. Keep `auto=off` while a candidate client is newer than the client in its selected feed.
 
+## Recover from an independent system
+
+Boot a separate LiberNT amd64 recovery installation or USB image with storage drivers for the target disk. Run the recovery client built from this revision as an administrator. The target Windows directory and protected updater data must be readable; recovery refuses the volume running the recovery system. The EFI partition must be on the target OS disk for this implementation.
+
+Identify the target OS volume and its boot partition before running the commands. These examples use `E:` for the offline OS and `S:` for its ESP. Drive letters can differ between the installed system and the recovery system. From the folder containing the recovery client:
+
+```bat
+start "" /wait LiberNTUpdate.exe /recover-offline --root E:\ --list
+set /p RECOVERY_TX=Transaction ID printed above:
+start "" /wait LiberNTUpdate.exe /recover-offline --root E:\ --tx "%RECOVERY_TX%" --boot-root S:\
+```
+
+For BIOS boot files stored on the OS volume, pass `--boot-root E:\`. An EFI volume GUID path from `mountvol` can replace `S:\`; the recovery client refuses an ESP that is not on the target OS disk. A completed direct install, such as an EFI loader update, is listed the same way as a pending one. Recovery restores the loader files from the transaction backup and does not change BCD. `--data-relative` selects an updater directory below the target volume when it differs from `ProgramData/LiberNTUpdate`. Recovery output goes to the console; this command does not create the recovery system's `cli-output.txt`.
+
+The selected transaction must be the current pending update or the confirmed install printed by `--list`. A pending install is undone; a pending rollback is completed. Backups and expected target contents are checked before the recovery plan runs. A changed local file or registry value is preserved and reported as a conflict. Incomplete recovery keeps the transaction active and blocks automatic reapplication and confirmation.
+
+Registry values are restored inside the offline SYSTEM, SOFTWARE and DEFAULT hives. Local values outside the transaction stay intact. The hives must be flushed and unloaded before recovery is recorded as complete. If loading a hive reports it in use, finish any other recovery operation. After an interrupted recovery process, restart the independent recovery OS before repeating the command.
+
+Read `tx/<id>/offline/plan.log` in the target updater directory if a plan fails. Once offline recovery has started, the boot-time update and rollback plans of that transaction no longer run and the service does not schedule a restart for it. The BIOS recovery entry still starts the previous kernel and HAL; repeat the offline recovery to finish the rest. Keep the backups until the repaired installation boots. After success, shut down the recovery system, remove its boot medium and verify the installed OS.
+
 ## Enable registry servicing
 
 1. Publish and install an OS bootstrap build containing the `UpdateExecute` SMSS change through the existing file-only feed. Complete its restart verification before enabling registry updates.

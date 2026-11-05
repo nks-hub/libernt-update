@@ -20,3 +20,10 @@ bool IsTestData();
 bool SecureUpdateData(std::wstring& error);
 bool CreateUpdateDataDirectory(const std::wstring& path, std::wstring& error);
 bool TrustedUpdateTree(const std::wstring& path, std::wstring& error);
+
+struct VolumeIdentity {
+    std::wstring root;
+    DWORD disk = 0, partition = 0;
+};
+bool ReadVolumeIdentity(const std::wstring& path, VolumeIdentity& identity);
+bool RecoveryBootVolume(const std::wstring& path, std::wstring& root);

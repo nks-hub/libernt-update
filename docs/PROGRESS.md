@@ -52,7 +52,19 @@ Stav k 5. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - Dvě EFI kopie zavaděče a soubor na NTFS prošly společnou aktualizací a návratem přes nativní helper a čtyři skutečné restarty. Test změnil nepoužívaný DOS stub a přepočítal PE checksum, aby šlo prokázat změnu bajtů bez změny kódu zavaděče. Obě kopie měly před testem i po návratu SHA-256 `e7cb92765a55135b70f93b475f67d90d604e34980b31836f9c8574be8b60c8bc`, během aktualizace `4799fc3ba2ec262087182bef1ceb2dd4c319ac5c18bd074989427eb2ec8ff8c7`.
 - Tento UEFI test používal OVMF, profil PC, disk MBR a vypnutý Secure Boot. Nativní helper měl SHA-256 `d4cf0ec21f4a3859bbbc887036bbc59a56b61476063d8669acf49a3d4b5cba48`. Původní boot příkazy jsou obnovené a dočasný systémový helper i testovací soubor odstraněné. Test neprokazuje GPT, fyzický počítač ani kompatibilitu jiné verze kódu zavaděče.
 - Klient s novou detekcí EFI prošel na původní testovací instalaci všemi 108 kontrolami. SHA-256: `6dc9eeb5bc14450da278ec3be8c32041af6b921fdb3f12ff1eb60d331ca0ec58`.
-- Přesný klon celého vypnutého testovacího disku byl před připojením bajtově porovnaný. Se dvěma shodnými ESP updater automatický výběr odmítl, přestože enumerace svazků ukázala jen první kopii. Klon je odpojený. Písmeno systémového disku změněné při testu kolize je obnovené na původní C: a opět prošlo všech osm kontrol detekce.
+- Přesný klon celého vypnutého testovacího disku byl před připojením bajtově porovnaný. Se dvěma shodnými ESP updater automatický výběr odmítl, přestože enumerace svazků ukázala jen první kopii. Po testu byl klon odpojený. Písmeno systémového disku je obnovené na původní C: a opět prošlo všech osm kontrol detekce. Pro další obnovovací testy má kopie vlastní identitu disku.
+- `602c662`: ověření EFI je odeslané a [CI 42020229612](https://github.com/nks-hub/libernt-update/actions/runs/42020229612) prošlo.
+
+## Nezávislá obnova
+
+- CLI `/recover-offline` pracuje z jiného systému s výslovně zvoleným cílovým svazkem a transakcí; běžící OS odmítá a výpis nezapisuje do jeho datové složky.
+- Pád boot ovladače: testovací transakce přidala ovladač, službu v SYSTEM a změnu hodnoty v SOFTWARE. Nový ovladač se Start=0 zavaděč při startu nenačetl, proto byl pád `0xE2` vyvolán ručním spuštěním služby. Systém mezitím transakci potvrdil; obnova proto musí umět vybrat i potvrzenou instalaci, když historie zůstala ve stavu čekání na restart.
+- Obnova ze samostatného LiberNT na druhém disku odstranila ovladač i službu, vrátila hodnotu v SOFTWARE a nesouvisející kontrolní hodnotu ponechala. Cílový disk potom samostatně nabootoval s prázdnou čekající transakcí.
+- Poškozený zavaděč: přímá transakce nahradila obě EFI kopie zavaděče 4 KiB neplatného obsahu. Firmware potom nenašel spustitelnou volbu a OS nenastartoval. Tento test odhalil, že obnova neuznávala dokončenou přímou instalaci; oprava přidala i regresní kontrolu.
+- Opravený klient ze samostatného systému vrátil obě kopie na původní SHA-256 `e7cb92765a55135b70f93b475f67d90d604e34980b31836f9c8574be8b60c8bc`. BCD měl před obnovou i po ní stejný hash; updater ho nemění. Cílový systém potom normálně nabootoval s prázdnou čekající transakcí.
+- Review po testu zachytilo tři další chyby: služba by po neúplné offline obnově každý den v nastavenou hodinu opakovaně restartovala, opakovaný `--list` mohl nabídnout starší instalaci a dvě odmítnutí neměla text chyby. Opravy mají vlastní regresní kontroly. Dokumentace nyní uvádí, že po zahájení offline obnovy se boot plány transakce už nespouštějí.
+- Výsledný klient prošel na LiberNT 125 kontrolami a 9 HTTP kontrolami bez chyby. SHA-256: `0192e9a2ff8aed23fcb9105bd4ce68925c079d4e0b3fabfb746b7cb967ce5388`. Skutečnou obnovu zavaděče provedl předchozí kandidát `cabe35dcc27e868e181d6c2c03e49a4b74103aa47bf1ca7ed0b35c563f9def51`; výběr transakce se od té doby změnil jen u starších instalací.
+- Testy proběhly ve VM s OVMF, diskem MBR a vypnutým Secure Boot. Fyzický UEFI počítač, GPT a Secure Boot ověřené nejsou. Testovací ovladač a poškozování zavaděče jsou jen v testovacím helperu, ne v běžném sestavení.
 
 ## Naměřený výkon registru
 
@@ -78,9 +90,8 @@ Kernel při každém startu zapisuje `FirmwareBootDevice` podle oddílu zavadě�
 ## Zbývající práce
 
 - Ověřit původní tovární základ registru konkrétní starší instalace při jejím prvním přechodu na v2 feed; migrace datové složky už je ověřená.
-- Dořešit obnovu ovladačů, které spadnou dříve, než se updater spustí; samotná záloha jádra a HAL nestačí.
-- Dořešit nezávislou návratovou cestu při selhání nového zavaděče; kód ve spuštěném systému takové selhání sám neopraví.
-- Nezávislou obnovu řešit i pro fyzický počítač; samotný návrat snapshotu na hypervizoru tento cíl nesplní.
+- Ověřit nezávislou obnovu na fyzickém počítači, s GPT a se Secure Boot; ve VM už prošla po pádu ovladače i po poškození zavaděče.
+- Ověřit pád ovladače, který se načte už zavaděčem; testovací ovladač se Start=0 se při startu nenačetl.
 - Doplnit běhové ověření EFI na GPT a fyzickém počítači; automatické určení a skutečný boot po změně i návratu zavaděče na OVMF/MBR už prošly.
 
 Nová klientská verze ani nový registry feed zatím nejsou publikované. Tento přehled není potvrzením, že všech pět omezení už zmizelo.

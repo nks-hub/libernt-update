@@ -2,6 +2,7 @@
 #include <thread>
 #include "registry_tests.inc"
 #include "migration_tests.inc"
+#include "offline_tests.inc"
 bool SelfTest(std::wstring& report) {
     g_testBootId = "test-boot-0";
     bool ok = true;
@@ -30,6 +31,7 @@ bool SelfTest(std::wstring& report) {
     g_dataOverride = JoinPath(base, L"data");
     ok = RegistrySelfTest(base, report) && ok;
     ok = MigrationSelfTest(base, report) && ok;
+    ok = OfflineSelfTest(base, report) && ok;
     Config cfg{L"file:///" + feed + L"\\", root};
     std::replace(cfg.feedUrl.begin(), cfg.feedUrl.end(), L'\\', L'/');
     auto put = [](const std::wstring& path, const std::string& text) { return WriteTextAtomic(path, text); };
@@ -188,6 +190,17 @@ bool SelfTest(std::wstring& report) {
     boot(FALSE);
     check(content(keep) == "keep v2" && FinalizePending(cfg, msg) && PendingTransaction().empty(),
           L"a cancellation committed before a crash never applies its old plan");
+
+    r = installLocked("OfflineRecovery", "keep offline");
+    std::string offlineTx = PendingTransaction();
+    SaveJson(BootFile(L"committed"), json{{"tx", offlineTx}, {"result", "offline-recovery"}});
+    boot(FALSE);
+    check(r == InstallOutcome::PendingRestart && content(keep) == "keep v2" && FinalizePending(cfg, msg) &&
+          PendingTransaction() == offlineTx && FileExists(BootFile(L"plan.txt")),
+          L"an incomplete offline recovery prevents boot reapplication and service confirmation");
+    check(!CancelPending(msg) && PendingTransaction() == offlineTx, L"an incomplete offline recovery cannot be cancelled");
+    DeleteFileW(BootFile(L"committed").c_str());
+    check(CancelPending(msg), L"untouched offline recovery test fixture is cancelled");
 
     std::wstring asideTarget = JoinPath(root, L"Program Files\\LiberNT Update\\LiberNTUpdate.exe");
     std::string asideTx = NewTxId("self-update-interrupted");

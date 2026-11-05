@@ -26,6 +26,14 @@ struct Config {
 };
 Config LoadConfig();
 
+struct OfflineRecovery {
+    Config target;
+    std::string transaction;
+    std::string dataRelative = "ProgramData/LiberNTUpdate";
+    bool listOnly = false;
+};
+bool RecoverOffline(const OfflineRecovery& options, std::wstring& report);
+
 /// Service loop: checks the feed every checkMinutes, installs when autoMode is "install", restarts a pending update
 /// at restartHour, and writes %ProgramData%\LiberNTUpdate\status.json for the tray icon. Returns when stop is set.
 void RunAutomatic(void* stopEvent);
