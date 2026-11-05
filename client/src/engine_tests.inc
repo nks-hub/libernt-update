@@ -61,7 +61,7 @@ bool SelfTest(std::wstring& report) {
         bool fixture = *privileges && put(target, "old") &&
                        ConvertStringSecurityDescriptorToSecurityDescriptorW(protectedSddl, SDDL_REVISION_1, &sd, nullptr) &&
                        ConvertStringSecurityDescriptorToSecurityDescriptorW(folderSddl, SDDL_REVISION_1, &folder, nullptr) &&
-                       SetFileSecurityW(target.c_str(), what, sd) &&
+                       SetFileAttributesW(target.c_str(), FILE_ATTRIBUTE_READONLY) && SetFileSecurityW(target.c_str(), what, sd) &&
                        SetFileSecurityW(JoinPath(base, L"protected").c_str(), DACL_SECURITY_INFORMATION, folder);
         if (sd) LocalFree(sd);
         if (folder) LocalFree(folder);
@@ -72,6 +72,18 @@ bool SelfTest(std::wstring& report) {
             error = L"this system lets the account delete the protected file " + expected;
         }
         if (fixture) {
+            std::wstring blocked = target + L".blocked";
+            put(blocked, "blocked");
+            std::wstring blockedRules = sddl(blocked);
+            // An open handle makes the rename fail after the unlock: both files must get their own rules back.
+            HANDLE open = CreateFileW(target.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+            bool refused = open != INVALID_HANDLE_VALUE &&
+                           !NT_SUCCESS(LuupRenameFile(NtPath(blocked).c_str(), NtPath(target).c_str(), TRUE));
+            if (open != INVALID_HANDLE_VALUE) CloseHandle(open);
+            std::vector<uint8_t> kept;
+            check(refused && sddl(target) == expected && sddl(blocked) == blockedRules && DeleteFileW(blocked.c_str()) &&
+                  ReadFileBytes(target, kept) && std::string(kept.begin(), kept.end()) == "old",
+                  L"a failed protected replacement restores the rules of both files");
             put(fresh, "new");
             bool replaced = NT_SUCCESS(LuupRenameFile(NtPath(fresh).c_str(), NtPath(target).c_str(), TRUE));
             std::vector<uint8_t> bytes;

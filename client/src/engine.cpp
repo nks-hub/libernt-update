@@ -228,9 +228,14 @@ std::vector<Op> OpsFromJson(const json& a) {
 #include "engine_registry.inc"
 
 // Protected system files refuse plain writes; the native rename and delete take ownership and keep their access rules.
+static bool NativeResult(NTSTATUS status) {
+    if (!NT_SUCCESS(status)) SetLastError(RtlNtStatusToDosError(status));
+    return NT_SUCCESS(status);
+}
+
 static bool MoveIntoPlace(const std::wstring& source, const std::wstring& target) {
     return MoveFileExW(source.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) ||
-           (GetLastError() == ERROR_ACCESS_DENIED && NT_SUCCESS(LuupRenameFile(NtPath(source).c_str(), NtPath(target).c_str(), TRUE)));
+           (GetLastError() == ERROR_ACCESS_DENIED && NativeResult(LuupRenameFile(NtPath(source).c_str(), NtPath(target).c_str(), TRUE)));
 }
 
 static bool CopyIntoPlace(const std::wstring& source, const std::wstring& target) {
@@ -238,13 +243,15 @@ static bool CopyIntoPlace(const std::wstring& source, const std::wstring& target
     if (GetLastError() != ERROR_ACCESS_DENIED) return false;
     std::wstring temporary = target + L".lntu-new";
     if (CopyFileW(source.c_str(), temporary.c_str(), FALSE) && MoveIntoPlace(temporary, target)) return true;
+    DWORD error = GetLastError();
     LuupDeleteFile(NtPath(temporary).c_str());
+    SetLastError(error);
     return false;
 }
 
 static bool RemoveTarget(const std::wstring& target) {
     return DeleteFileW(target.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND ||
-           (GetLastError() == ERROR_ACCESS_DENIED && NT_SUCCESS(LuupDeleteFile(NtPath(target).c_str())));
+           (GetLastError() == ERROR_ACCESS_DENIED && NativeResult(LuupDeleteFile(NtPath(target).c_str())));
 }
 
 /// Puts back the backups of the ops already applied (in reverse) after a failure in the middle. Every step goes to

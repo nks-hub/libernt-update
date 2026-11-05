@@ -267,6 +267,7 @@ NTSTATUS LuupDeleteFile(PCWSTR ntPath) {
     ProtectedPrivileges(TRUE, saved);
     st = UnlockProtected(ntPath, &original);
     if (NT_SUCCESS(st)) {
+        ClearReadOnly(ntPath);
         st = DeleteOnce(ntPath);
         if (!NT_SUCCESS(st)) SetSecurity(ntPath, WRITE_OWNER | WRITE_DAC, LUUP_FILE_SECURITY, original);
         LuupFree(original);
@@ -408,29 +409,38 @@ static NTSTATUS RenameOnce(PCWSTR from, PCWSTR to, BOOLEAN replace, PSECURITY_DE
     ULONG nameBytes = Len(to) * sizeof(WCHAR);
     ULONG infoSize = (ULONG)FIELD_OFFSET(LUUP_RENAME_INFO, FileName) + nameBytes;
     LUUP_RENAME_INFO* info;
+    PSECURITY_DESCRIPTOR own = NULL;
+    ULONG ownSize = 0;
 
     InitPath(&us, &oa, from);
-    st = NtOpenFile(&h, DELETE | SYNCHRONIZE | (security ? WRITE_DAC | WRITE_OWNER : 0), &oa, &iosb,
+    st = NtOpenFile(&h, DELETE | SYNCHRONIZE | (security ? READ_CONTROL | WRITE_DAC | WRITE_OWNER : 0), &oa, &iosb,
                     FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT | (security ? FILE_OPEN_FOR_BACKUP_INTENT : 0));
     if (!NT_SUCCESS(st)) return st;
     if (security) {
-        st = NtSetSecurityObject(h, LUUP_FILE_SECURITY, security);
+        /* Kept so a failed rename leaves the source as removable as before. */
+        NtQuerySecurityObject(h, LUUP_FILE_SECURITY, NULL, 0, &ownSize);
+        own = ownSize ? Alloc(ownSize) : NULL;
+        st = own ? NtQuerySecurityObject(h, LUUP_FILE_SECURITY, own, ownSize, &ownSize) : LUUP_STATUS_NO_MEMORY;
+        if (NT_SUCCESS(st)) st = NtSetSecurityObject(h, LUUP_FILE_SECURITY, security);
         if (!NT_SUCCESS(st)) {
+            LuupFree(own);
             NtClose(h);
             return st;
         }
     }
     info = (LUUP_RENAME_INFO*)Alloc(infoSize);
     if (!info) {
-        NtClose(h);
-        return LUUP_STATUS_NO_MEMORY;
+        st = LUUP_STATUS_NO_MEMORY;
+    } else {
+        info->ReplaceIfExists = replace;
+        info->RootDirectory = NULL;
+        info->FileNameLength = nameBytes;
+        Copy(info->FileName, to, nameBytes);
+        st = NtSetInformationFile(h, &iosb, info, infoSize, LUUP_FileRenameInformation);
+        LuupFree(info);
     }
-    info->ReplaceIfExists = replace;
-    info->RootDirectory = NULL;
-    info->FileNameLength = nameBytes;
-    Copy(info->FileName, to, nameBytes);
-    st = NtSetInformationFile(h, &iosb, info, infoSize, LUUP_FileRenameInformation);
-    LuupFree(info);
+    if (!NT_SUCCESS(st) && own) NtSetSecurityObject(h, LUUP_FILE_SECURITY, own);
+    LuupFree(own);
     NtClose(h);
     return st;
 }
@@ -447,6 +457,9 @@ NTSTATUS LuupRenameFile(PCWSTR from, PCWSTR to, BOOLEAN replace) {
     ProtectedPrivileges(TRUE, saved);
     st = UnlockProtected(to, &original);
     if (NT_SUCCESS(st)) {
+        /* shortcut: the original descriptor lives only in memory; a power loss before the rename leaves the target
+         * owned by SYSTEM with full access for SYSTEM and Administrators. Journal it if that window matters. */
+        ClearReadOnly(to);
         st = RenameOnce(from, to, TRUE, original);
         if (!NT_SUCCESS(st)) SetSecurity(to, WRITE_OWNER | WRITE_DAC, LUUP_FILE_SECURITY, original);
         LuupFree(original);
