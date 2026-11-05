@@ -46,6 +46,7 @@ Stav k 5. listopadu 2026. Tento dokument se průběžně aktualizuje. Rozpracova
 - Skutečná starší instalace prošla `/migrate-legacy`, instalací testovaného klienta, registrací služby, `/check` a normálním restartem. Služba běží se shodným SHA-256, nová složka prošla kontrolou oprávnění a `pending` je prázdný. Automatické instalace zůstávají vypnuté.
 - Starý připravený plán 1 194 souborů nebyl aplikován. Hash jádra po restartu zůstal `047e21f4200a0cf11ca1e0e363b1f3915377f43f27e76814df1fd06ce5d1422d`; archivované `state.json`, `history.json` a `boot/plan.txt` se bajtově shodují s původními soubory.
 - Závěrečná oprava z review odmítá také adresář místo příznaku obnovy a nepřístupný boot adresář; kontrola se opakuje po zastavení služby. Rozšířená sada na LiberNT prošla 108 kontrolami. SHA-256 klienta: `5cd0e7038013ad86d8d4d44be3eb10da46ccd9c19066b0372439a244fb32eb96`.
+- `18b6a96`: migrace je odeslaná a [CI 42005500867](https://github.com/nks-hub/libernt-update/actions/runs/42005500867) prošlo. Služba ve VM běží také s touto závěrečnou verzí klienta a prošla kontrolou běhu po dobu 30 sekund.
 
 ## Naměřený výkon registru
 
@@ -63,6 +64,8 @@ Při shodných podepsaných hashech se nyní tato práce neprovádí. Uvedená �
 Původní `BootExecute` běží před `NtInitializeRegistry`. SOFTWARE ještě není připojený a `CmFlushKey` může kvůli `CmpNoWrite` vrátit úspěch bez zápisu na disk. První skutečný test proto správně odmítl zápis a obnovil původní soubory. Pouhé dočasné připojení hive by příčinu nevyřešilo. Proto je nutná fáze `UpdateExecute` a kontrola její dostupnosti; marker je v paměťovém hive `HARDWARE`, aby nezůstal po návratu ke staršímu SMSS.
 
 Cppcheck s cestami a přepínači skutečného sestavení nenašel problém v novém `update.c`. V `sminit.c:957` hlásí původní `uninitvar`, který je i v předchozí revizi; tento nesouvisející úsek se neměnil.
+
+První UEFI test samotného továrního obrazu `5fccfb5` na Q35 skončil před updaterem pádem `0x7B / 0xC0000034`. Debugger potvrdil ARC cestu k druhému oddílu, načtený `storahci` i `disk.sys`, ale žádné vytvořené diskové zařízení. Profil Q35 obsahoval dva AHCI řadiče a disk byl za dalšími PCI mosty. Pro další UEFI ověření se použije také jednodušší profil PC shodný s dosavadní testovací instalací; příčina rozdílu Q35 zatím není potvrzená.
 
 Kernel při každém startu zapisuje `FirmwareBootDevice` podle oddílu zavaděče a `SystemBootDevice` podle oddílu Windows. První údaj může pomoci s hledáním EFI oddílu, ale UEFI loader při neúspěšném hledání dosadí OS oddíl bez zvláštního příznaku. Proto samotné přečtení této hodnoty nestačí k bezpečné aktualizaci zavaděče. Je nutné ověřit oddíl i očekávaný loader; při rozporu nadále vyžadovat `bootRoot`.
 
