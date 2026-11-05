@@ -7,6 +7,10 @@ NTSYSAPI NTSTATUS NTAPI NtDisplayString(PUNICODE_STRING);
 NTSYSAPI NTSTATUS NTAPI NtTerminateProcess(HANDLE, NTSTATUS);
 NTSYSAPI NTSTATUS NTAPI NtOpenKey(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES);
 NTSYSAPI NTSTATUS NTAPI NtQueryValueKey(HANDLE, PUNICODE_STRING, ULONG, PVOID, ULONG, PULONG);
+NTSYSAPI NTSTATUS NTAPI NtShutdownSystem(ULONG);
+NTSYSAPI NTSTATUS NTAPI RtlAdjustPrivilege(ULONG, BOOLEAN, BOOLEAN, PBOOLEAN);
+#define LUUP_SE_SHUTDOWN 19
+#define LUUP_SHUTDOWN_REBOOT 1
 
 typedef struct {
     ULONG TitleIndex, Type, DataLength;
@@ -67,6 +71,14 @@ static PWSTR DataDirFromCommandLine(PPEB peb, PWSTR out, ULONG cap) {
 void NTAPI NtProcessStartup(PPEB peb) {
     static WCHAR dir[512];
     NTSTATUS st = (NTSTATUS)0xC000000DL;
-    if (DataDirFromCommandLine(peb, dir, 512)) st = LuupBoot(dir, RecoveryBoot(), Say);
+    BOOLEAN changed = FALSE, previous;
+    if (DataDirFromCommandLine(peb, dir, 512)) st = LuupBoot(dir, RecoveryBoot(), Say, &changed);
+    /* The running kernel, smss and ntdll still belong to the previous files. Continuing this boot would start
+     * csrss and the rest of the system from the replaced files on top of them, which crashed smss in testing. */
+    if (changed) {
+        Say(L"LiberNT Update: restarting to finish...\n");
+        RtlAdjustPrivilege(LUUP_SE_SHUTDOWN, TRUE, FALSE, &previous);
+        NtShutdownSystem(LUUP_SHUTDOWN_REBOOT);
+    }
     NtTerminateProcess((HANDLE)-1, st);
 }

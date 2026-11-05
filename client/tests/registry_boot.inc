@@ -143,15 +143,15 @@ static int RegistryBootProbe(const std::wstring& mode, const Config& cfg) {
         std::cout << "PASS original BootExecute restored exactly; test helper removed" << std::endl;
         return 0;
     }
-    bool done = FinalizePending(cfg, error);
-    bool installed = mode == L"registry-second";
-    bool first = mode == L"registry-first" || mode == L"registry-undo-first";
+    // luupboot restarts right after applying a plan, so the first boot the probe sees confirms the result.
+    bool done = PendingTransaction().empty() || FinalizePending(cfg, error);
+    bool installed = mode == L"registry-first" || mode == L"registry-second";
     bool undo = mode == L"registry-undo-first" || mode == L"registry-undo-second";
     RegistryItem actual = value;
     bool matched = ReadRegistryItem(actual, error) && (undo ? !actual.present : SameRegistryData(actual, value));
     matched = matched && Sha256File(file) == (undo ? Sha256Hex("before", 6) : Sha256Hex("after", 5));
-    bool ok = done && matched && (first ? !PendingTransaction().empty() && FileExists(BootFile(L"trial"))
-                                         : PendingTransaction().empty() && LoadState().value("registryRelease", "") == (installed ? "ProbeAfter" : "ProbeBefore"));
+    bool ok = done && matched && PendingTransaction().empty() &&
+              LoadState().value("registryRelease", "") == (installed ? "ProbeAfter" : "ProbeBefore");
     std::cout << (ok ? "PASS " : "FAIL ") << Narrow(mode) << " boot=" << CurrentBootId() << " " << Narrow(error) << std::endl;
     return ok ? 0 : 1;
 }

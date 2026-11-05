@@ -82,8 +82,8 @@ static int UefiBootProbe(const std::wstring& mode) {
         return outcome == InstallOutcome::PendingRestart ? 0 : 1;
     }
     bool rollback = mode.find(L"rollback") != std::wstring::npos || mode == L"uefi-cleanup";
-    bool first = mode == L"uefi-first" || mode == L"uefi-rollback-first";
-    bool ok = PendingTransaction().empty() ? !first : FinalizePending(cfg, error);
+    // luupboot restarts right after applying a plan, so the first boot the probe sees confirms the result.
+    bool ok = PendingTransaction().empty() || FinalizePending(cfg, error);
     for (const auto& loader : saved["loaders"]) {
         std::string hash = Sha256File(TargetPath(cfg, loader["path"].get<std::string>()));
         bool same = hash == loader[rollback ? "before" : "after"].get<std::string>();
@@ -94,8 +94,7 @@ static int UefiBootProbe(const std::wstring& mode) {
     bool dummyMatches = Sha256File(dummy) == expectedDummy;
     std::cout << (dummyMatches ? "PASS " : "FAIL ") << "OS partition probe " << Sha256File(dummy) << "\n";
     ok = ok && dummyMatches;
-    ok = ok && (first ? !PendingTransaction().empty() && FileExists(BootFile(L"trial"))
-                     : PendingTransaction().empty() && InstalledRelease() == (rollback ? "UefiBefore" : "UefiAfter"));
+    ok = ok && PendingTransaction().empty() && InstalledRelease() == (rollback ? "UefiBefore" : "UefiAfter");
     std::cout << "installed=" << InstalledRelease() << " pending=" << PendingTransaction() << " boot=" << CurrentBootId()
               << " " << Narrow(error) << "\n";
     if (mode == L"uefi-cleanup" && ok) {

@@ -169,7 +169,7 @@ bool SelfTest(std::wstring& report) {
     int bootIndex = 0;
     auto boot = [&](BOOLEAN force) {
         g_testBootId = "test-boot-" + std::to_string(++bootIndex);
-        return LuupBoot(dataNt.c_str(), force, nullptr);
+        return LuupBoot(dataNt.c_str(), force, nullptr, nullptr);
     };
     r = installLocked("R3", "keep v2");
     check(r == InstallOutcome::PendingRestart && FileExists(BootFile(L"plan.txt")) && content(keep) == "keep",

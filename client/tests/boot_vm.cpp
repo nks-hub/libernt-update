@@ -197,12 +197,12 @@ int wmain(int argc, wchar_t** argv) {
         }
         return 0;
     }
-    bool finalized = FinalizePending(cfg, error);
+    bool finalized = PendingTransaction().empty() || FinalizePending(cfg, error);
     std::cout << Narrow(error) << std::endl;
     std::cout << "installed=" << InstalledRelease() << " pending=" << PendingTransaction() << " boot=" << CurrentBootId() << std::endl;
     bool trial = FileExists(BootFile(L"trial"));
-    bool ok = finalized && (mode == L"first" ? trial && !PendingTransaction().empty() && InstalledRelease() == "ProbeBefore"
-                                : mode == L"second" ? !trial && PendingTransaction().empty() && InstalledRelease() == "ProbeAfter"
+    // luupboot restarts right after applying a plan, so the first boot the probe sees confirms the update.
+    bool ok = finalized && (mode == L"first" || mode == L"second" ? !trial && PendingTransaction().empty() && InstalledRelease() == "ProbeAfter"
                                 : mode == L"recovered" ? !trial && PendingTransaction().empty() && InstalledRelease() == "ProbeBefore"
                                 : false);
     std::cout << (ok ? "PASS" : "FAIL") << std::endl;

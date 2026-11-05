@@ -141,7 +141,7 @@ static bool RegistryMigrationSelfTest(const std::wstring& base, const std::wstri
     auto boot = [&]() {
         static unsigned index = 0;
         g_testBootId = "registry-boot-" + std::to_string(++index);
-        return NT_SUCCESS(LuupBoot(NtPath(DataDir()).c_str(), FALSE, nullptr));
+        return NT_SUCCESS(LuupBoot(NtPath(DataDir()).c_str(), FALSE, nullptr, nullptr));
     };
     check(boot() && Sha256File(file) == Sha256Hex("after", 5), L"boot plan applies the signed file and registry migration");
     RegistryItem start{sandbox + L"\\SYSTEM\\CurrentControlSet\\Services\\Demo", L"Start"};

@@ -648,7 +648,7 @@ static NTSTATUS WriteCount(PCWSTR path, ULONG n) {
     return LuupWriteFile(path, buf, (ULONG)(p - buf));
 }
 
-NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR text)) {
+NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR text), BOOLEAN* filesChanged) {
     PWSTR plan = BootFile(dataDirNt, L"plan.txt"), planDone = BootFile(dataDirNt, L"plan.done");
     PWSTR rb = BootFile(dataDirNt, L"rollback.txt"), rbDone = BootFile(dataDirNt, L"rollback.done");
     PWSTR trial = BootFile(dataDirNt, L"trial"), result = BootFile(dataDirNt, L"result.txt");
@@ -660,6 +660,7 @@ NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR te
     NTSTATUS st = STATUS_SUCCESS;
     BOOLEAN rollback = FALSE;
 
+    if (filesChanged) *filesChanged = FALSE;
     if (!plan || !planDone || !rb || !rbDone || !trial || !result || !marker || !cancelled || !applying || !committed) {
         st = LUUP_STATUS_NO_MEMORY;
         goto out;
@@ -681,6 +682,7 @@ NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR te
         st = LuupWriteFile(applying, "applying\n", 9);
         if (!NT_SUCCESS(st)) goto out;
         st = LuupApplyPlan(plan, &r, planLog);
+        if (filesChanged) *filesChanged = TRUE;
         WriteResult(result, "plan", &r, st);
         if (!NT_SUCCESS(st) || r.Failed) {
             rollback = TRUE;
@@ -707,6 +709,7 @@ restore:
     if (rollback && LuupFileExists(rb)) {
         if (say) say(L"LiberNT Update: restoring the previous version...\n");
         st = LuupApplyPlan(rb, &r, rbLog);
+        if (filesChanged) *filesChanged = TRUE;
         WriteResult(result, "rollback", &r, st);
         if (NT_SUCCESS(st) && !r.Failed) {
             st = LuupWriteFile(marker, "rolledback\n", 11);

@@ -36,8 +36,9 @@ NTSTATUS LuupApplyPlan(PCWSTR planNtPath, LUUP_RESULT* result, PCWSTR logNtPath)
  *   result.txt    outcome of the last plan or rollback, for the service
  *   rolledback    written when luupboot itself rolled the update back
  * The update is rolled back when forceRollback is set (recovery boot entry) or on the third boot that the
- * service never confirmed. say() shows progress on the boot screen; it may be NULL. */
-NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR text));
+ * service never confirmed. say() shows progress on the boot screen; it may be NULL. filesChanged (may be NULL)
+ * reports that this boot applied a plan or a rollback, so the caller must restart before anything else runs. */
+NTSTATUS LuupBoot(PCWSTR dataDirNt, BOOLEAN forceRollback, void (*say)(PCWSTR text), BOOLEAN* filesChanged);
 
 /* NtCreateFile/NtReadFile helpers, also used by luupboot.exe for its state files. */
 NTSTATUS LuupReadFile(PCWSTR ntPath, PVOID* data, ULONG* size);

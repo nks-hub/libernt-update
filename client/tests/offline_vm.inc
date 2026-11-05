@@ -255,12 +255,11 @@ static int OfflineVmProbe(const std::wstring& mode) {
             std::cout << (outcome == InstallOutcome::PendingRestart ? "PASS " : "FAIL ") << Narrow(error) << "\n";
             return outcome == InstallOutcome::PendingRestart ? 0 : 1;
         }
-        bool rollback = mode.find(L"rollback") != std::wstring::npos, first = mode.find(L"first") != std::wstring::npos;
+        bool rollback = mode.find(L"rollback") != std::wstring::npos;
         bool finalized = PendingTransaction().empty() || FinalizePending(cfg, error);
         std::string hash = Sha256File(beep), acl = sddl();
         bool ok = finalized && hash == saved.value(rollback ? "before" : "after", "") && acl == saved.value("acl", "") &&
-                  (first ? !PendingTransaction().empty()
-                         : PendingTransaction().empty() && InstalledRelease() == (rollback ? "RecoveryBefore" : "RecoveryProtected"));
+                  PendingTransaction().empty() && InstalledRelease() == (rollback ? "RecoveryBefore" : "RecoveryProtected");
         std::cout << (ok ? "PASS " : "FAIL ") << Narrow(mode) << " beep.sys=" << hash << " aclKept=" << (acl == saved.value("acl", ""))
                   << " installed=" << InstalledRelease() << " pending=" << PendingTransaction() << " " << Narrow(error) << "\n";
         return ok ? 0 : 1;
@@ -289,11 +288,11 @@ static int OfflineVmProbe(const std::wstring& mode) {
     }
     if (mode == L"offline-bootdriver-first" || mode == L"offline-bootdriver-recovered") {
         bool first = mode == L"offline-bootdriver-first";
-        bool finalized = first ? FinalizePending(cfg, error) : true;
+        bool finalized = first ? PendingTransaction().empty() || FinalizePending(cfg, error) : true;
         auto saved = LoadJson(JoinPath(DataDir(), L"victim.json"), json::object());
         std::string have = Sha256File(L"C:\\Windows\\System32\\drivers\\disk.sys");
         bool ok = finalized && !saved.empty() &&
-                  (first ? have == saved.value("diskAfter", "") && !PendingTransaction().empty() && FileExists(BootFile(L"trial"))
+                  (first ? have == saved.value("diskAfter", "")
                          : have == saved.value("diskBefore", "") && PendingTransaction().empty() && InstalledRelease() == "RecoveryBefore");
         std::cout << (ok ? "PASS " : "FAIL ") << Narrow(mode) << " disk.sys=" << have << " installed=" << InstalledRelease()
                   << " pending=" << PendingTransaction() << " " << Narrow(error) << "\n";
@@ -355,13 +354,13 @@ static int OfflineVmProbe(const std::wstring& mode) {
         return outcome == InstallOutcome::PendingRestart ? 0 : 1;
     }
     if (mode == L"offline-driver-first") {
-        bool finalized = FinalizePending(cfg, error);
+        bool finalized = PendingTransaction().empty() || FinalizePending(cfg, error);
         DWORD value = 0, keep = 0, size = sizeof(DWORD);
         bool values = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\LiberNTUpdateRecoveryProbe", L"Value", RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS;
         size = sizeof(DWORD);
         values = values && RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\LiberNTUpdateRecoveryProbe", L"Keep", RRF_RT_REG_DWORD, nullptr, &keep, &size) == ERROR_SUCCESS;
         auto saved = LoadJson(JoinPath(DataDir(), L"victim.json"), json::object());
-        bool ok = finalized && !PendingTransaction().empty() && FileExists(BootFile(L"trial")) && values && value == 2 && keep == 73 &&
+        bool ok = finalized && values && value == 2 && keep == 73 &&
                   Sha256File(L"C:\\Windows\\System32\\drivers\\lntu_recovery_crash.sys") == saved.value("driverAfter", "");
         std::cout << (ok ? "PASS " : "FAIL ") << "bad driver applied, registry=" << value << " keep=" << keep << " " << Narrow(error) << "\n";
         return ok ? 0 : 1;
