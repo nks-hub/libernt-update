@@ -76,6 +76,22 @@ int wmain(int argc, wchar_t** argv) {
                   << " same_baseline_compare_ms=" << 1000.0 * (compared.QuadPart - parsed.QuadPart) / frequency.QuadPart << std::endl;
         return ok ? 0 : 1;
     }
+    if (mode == L"registry-plan" && argc == 4) {
+        // Read-only: plans a baseline change against the live registry without applying it.
+        std::vector<uint8_t> beforeRaw, afterRaw;
+        RegistrySnapshot before, after;
+        std::vector<RegistryChange> changes;
+        size_t preserved = 0;
+        bool ok = ReadFileBytes(argv[2], beforeRaw, 16 * 1024 * 1024) && ReadFileBytes(argv[3], afterRaw, 16 * 1024 * 1024) &&
+                  ParseRegistrySnapshot(beforeRaw, before, error) && ParseRegistrySnapshot(afterRaw, after, error) &&
+                  PlanRegistryChanges(before, after, changes, preserved, error);
+        std::cout << (ok ? "PASS" : "FAIL") << " before=" << Sha256Hex(beforeRaw.data(), beforeRaw.size())
+                  << " after=" << Sha256Hex(afterRaw.data(), afterRaw.size()) << " changes=" << changes.size()
+                  << " preserved=" << preserved << " " << Narrow(error) << "\n";
+        for (const auto& change : changes)
+            std::cout << (change.after.present ? "SET " : "DEL ") << Narrow(RegistryDisplayName(change.after)) << "\n";
+        return ok ? 0 : 1;
+    }
     if (mode.rfind(L"registry-", 0) == 0 || mode.rfind(L"smss-", 0) == 0) return RegistryBootProbe(mode, cfg);
     if (mode == L"selftest-client") {
         SECURITY_ATTRIBUTES attributes{sizeof attributes, nullptr, TRUE};
