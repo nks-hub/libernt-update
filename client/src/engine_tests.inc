@@ -25,6 +25,10 @@ bool SelfTest(std::wstring& report) {
     sig[0] ^= 1;
     check(crypto_ed25519_check(sig.data(), pub.data(), nullptr, 0) != 0, L"Ed25519 rejects a damaged signature");
 
+    wchar_t volumeRoot[MAX_PATH];
+    if (GetVolumeNameForVolumeMountPointW(L"C:\\", volumeRoot, MAX_PATH))
+        check(EnsureDirs(JoinPath(volumeRoot, L"freeldr.sys"), true), L"a file in the root of a volume GUID path needs no folder");
+
     // Transaction logic against a scratch system drive and a file:/// feed.
     wchar_t tmp[MAX_PATH];
     GetTempPathW(MAX_PATH, tmp);

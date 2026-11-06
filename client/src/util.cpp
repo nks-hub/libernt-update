@@ -105,6 +105,8 @@ std::wstring ParentDir(const std::wstring& path) {
 bool EnsureDirs(const std::wstring& path, bool isFile) {
     std::wstring dir = isFile ? ParentDir(path) : path;
     if (dir.empty() || dir.size() <= 3) return true;  // drive root
+    // \\?\Volume{...} or \\?\C: is a volume root (the EFI partition has no drive letter); it cannot be created.
+    if (dir.compare(0, 4, L"\\\\?\\") == 0 && dir.find_first_of(L"\\/", 4) == std::wstring::npos) return true;
     DWORD a = GetFileAttributesW(dir.c_str());
     if (a != INVALID_FILE_ATTRIBUTES) return (a & FILE_ATTRIBUTE_DIRECTORY) != 0;
     if (!EnsureDirs(dir, true)) return false;
