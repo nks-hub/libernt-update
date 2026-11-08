@@ -69,6 +69,8 @@ else
     if ! grep -q "$head" "$OUT/sdk/include/reactos/buildno.h" 2>/dev/null; then
         cmake -S "$SRC" -B "$OUT" > /dev/null
     fi
+    # Mesa Gallium (the OpenGL ICD that D3D through wined3d needs) is only in the submodules target, as in upstream CI
+    ninja -C "$OUT" -j"$(nproc)" submodules
     ninja -C "$OUT" -j"$(nproc)" liberntimg
     [ -z "$(git status --porcelain --untracked-files=normal)" ] && [ "$(git rev-parse HEAD)" = "$head" ] || {
         echo "source checkout changed while building" >&2; exit 1;
